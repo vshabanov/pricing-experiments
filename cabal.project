@@ -1,0 +1,10 @@
+packages:
+  *.cabal
+
+package pricing-experiments
+  optimization: 2
+
+-- package hmatrix
+--   flags: +openblas
+
+-- allow-newer: quantfin:*

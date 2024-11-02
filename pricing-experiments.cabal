@@ -1,0 +1,39 @@
+cabal-version:       >=1.10
+name:                pricing-experiments
+version:             0.1.0.0
+license-file:        LICENSE
+author:              Vladimir Shabanov
+maintainer:          dev@vshabanov.com
+build-type:          Simple
+extra-source-files:  CHANGELOG.md
+
+executable Test
+  main-is:             Main.hs
+  -- other-modules:
+  -- other-extensions:
+  build-depends:       QuickCheck >= 2.14.2,
+                       ad,
+                       array >= 0.5.3.0,
+                       async,
+                       base >=4.12,
+                       bytestring >= 0.12.0.2,
+                       comfort-array,
+                       containers >= 0.6.0.1,
+                       criterion,
+                       erf,
+                       ghc-bignum >= 1.3,
+                       ghc-prim >= 0.11.0,
+                       gnuplot,
+                       hmatrix,
+                       mtl >= 2.3.1,
+                       mwc-random,
+                       pretty-show >= 1.10,
+                       random >= 1.2.0,
+                       recursion-schemes,
+                       reflection >= 2.1.8,
+                       split >= 0.2.5,
+                       splitmix,
+                       text >= 1.2.4.1,
+                       unordered-containers >= 0.2.13.0,
+                       vector
+  default-language:    GHC2021
