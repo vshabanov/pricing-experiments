@@ -87,11 +87,28 @@ data OptionDirection
   | Put
   deriving Show
 
+data BarrierPosition
+  = Upper
+  | Lower
+  deriving Show
+
+data PayOn
+  = PayOnTouch    -- ^ rebate paid at hit
+  | PayOnEnd      -- ^ rebate paid at end
+  deriving Show
+
 data Option a
   = Option
     { oStrike :: a
     , oMaturityInYears :: a
     , oDirection :: OptionDirection
+    }
+data OneTouch a
+  = OneTouch
+    { otBarrier :: a
+    , otBarrierPosition :: BarrierPosition
+    , otPayOn :: PayOn
+    , otMaturityInYears :: a
     }
 data Forward a
   = Forward
@@ -110,7 +127,7 @@ forwardRate market (MaturityInYears τ) = x * exp ((rd-rf)*τ)
     rd = market RateDom
     rf = market RateFor
 
-digiPricer :: Erf a => Option a -> (Input -> a) -> Greek -> a
+digiPricer :: Erf a => Option a -> Market a -> Greek -> a
 digiPricer o market what = case what of
   PV ->
     φ * exp (-rd*τ) * nc (φ*dm) -- digi
@@ -126,10 +143,9 @@ digiPricer o market what = case what of
     f = x * exp ((rd-rf)*τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
 
-blackSholesPricer :: Erf a => Option a -> (Input -> a) -> Greek -> a
-blackSholesPricer o market what = case what of
+blackScholesPricer :: Erf a => Option a -> Market a -> Greek -> a
+blackScholesPricer o market what = case what of
   PV ->
---    φ * exp (-rd*τ) * nc (φ*dm) -- digi
     φ * exp (-rd*τ) * (f * nc (φ*dp) - k * nc (φ*dm))
   RhoDom ->
     φ * k * τ * exp (-rd*τ) * nc (φ*dm)
@@ -160,13 +176,53 @@ blackSholesPricer o market what = case what of
     dp = (log (f/k) + σ^2/2*τ) / (σ*sqrt τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
 
+pay1Pricer :: Erf a => OneTouch a -> Market a -> Greek -> a
+pay1Pricer ot market PV = exp (-rd*τ)
+  where
+    τ = otMaturityInYears ot - market PricingDate
+    rd = market RateDom
+
+noTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
+noTouchPricer ot market what =
+  pay1Pricer ot market what - oneTouchPricer ot market what
+
+oneTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
+oneTouchPricer ot market PV =
+  exp (-ω*rd*τ) *
+  (  (b/x)**((θm+𝜗m)/σ) * nc (-η*ep)
+   + (b/x)**((θm-𝜗m)/σ) * nc ( η*em))
+  where
+    b = otBarrier ot
+    τ = otMaturityInYears ot - market PricingDate
+    η = otη ot
+    ω = otω ot
+    x = market Spot
+    σ = market Vol
+    rd = market RateDom
+    rf = market RateFor
+    θp = (rd-rf)/σ + σ/2
+    θm = (rd-rf)/σ - σ/2
+    𝜗m = sqrt (θm^2 + 2*(1-ω)*rd)
+    ep = ( log (x/b) - σ*𝜗m*τ) / (σ*sqrt τ)
+    em = (-log (x/b) - σ*𝜗m*τ) / (σ*sqrt τ)
+    nc = normcdf
+    n = normdf
+
 oφ o = case oDirection o of
   Call ->  1
   Put  -> -1
 
+otη ot = case otBarrierPosition ot of
+  Upper -> -1
+  Lower ->  1
+
+otω ot = case otPayOn ot of
+  PayOnTouch -> 0
+  PayOnEnd   -> 1
+
 normdf t = exp (- t^2/2) / sqrt (2*pi)
 
-forwardPricer :: Floating a => Forward a -> (Input -> a) -> Greek -> a
+forwardPricer :: Floating a => Forward a -> Market a -> Greek -> a
 forwardPricer f market what = case what of
   PV ->
     x * exp ((-rf)*τ) - k * exp ((-rd)*τ)
@@ -188,7 +244,14 @@ spotAtT market ϵ τ =
     rd = market RateDom
     rf = market RateFor
 
-optionPv :: N a => Option a -> (Input -> a) -> (a -> a) -> a
+pay1Pv :: N a => Option a -> Market a -> (a -> a) -> a
+pay1Pv o market _ =
+  exp (-rd*τ)
+  where
+    rd = market RateDom
+    τ = oMaturityInYears o - market PricingDate
+
+optionPv :: N a => Option a -> Market a -> (a -> a) -> a
 optionPv o market spotAt =
   exp (-rd*τ) * -- log1pexp (payoff * scale) / scale
   step payoff * payoff
@@ -200,6 +263,18 @@ optionPv o market spotAt =
     τ = oMaturityInYears o - market PricingDate
     φ = oφ o
     rd = market RateDom
+
+digiOptionPv o market spotAt =
+  exp (-rd*τ) * step (φ * (spotAt τ - k))
+  where
+    k = oStrike o
+    τ = oMaturityInYears o - market PricingDate
+    φ = oφ o
+    rd = market RateDom
+
+combine a b market what = a market what + b market what
+scale s f market what = s * f market what
+
 
 toDouble :: N a => a -> Double
 toDouble = realToFrac
@@ -234,17 +309,6 @@ instance (Reifies s R.Tape, Ord a, Erf a, N a) => N (R.Reverse s a) where
     (\ x -> k / (exp (k*x) + exp (-k*x) + 2))
   -- no NaN this way, but error grows for width<0.1, and breaks at 0.0003
 -- 1000 / (exp 1000 + exp (-1000) + 2)
-
-digiOptionPv o market spotAt =
-  exp (-rd*τ) * step (φ * (spotAt τ - k))
-  where
-    k = oStrike o
-    τ = oMaturityInYears o - market PricingDate
-    φ = oφ o
-    rd = market RateDom
-
-combine a b market what = a market what + b market what
-scale s f market what = s * f market what
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -301,7 +365,7 @@ integrated = integrated' $ truncate (10/width :: Double)
 
 -- doesn't help
 {-# SPECIALIZE integrated' :: Int -> Market Double -> Double #-}
-{-# SPECIALIZE fem' :: Int -> Int -> Market Double -> Double #-}
+-- {-# SPECIALIZE fem' :: Int -> Int -> Market Double -> Double #-}
 
 integrated' :: N a => Int -> Market a -> a
 integrated' n mkt = realToFrac step * treeSum
@@ -315,11 +379,17 @@ integrated' n mkt = realToFrac step * treeSum
 o :: Erf a => Option a
 o = Option
   { oStrike =
-    1
+    1.2
 --    forwardRate mkt (oMaturityInYears o)
   , oMaturityInYears = 1 -- 0.1/365
   , oDirection = Call }
-
+ot :: Erf a => OneTouch a
+ot = OneTouch
+  { otBarrier = 0.9
+  , otBarrierPosition = Lower
+  , otPayOn = PayOnEnd
+  , otMaturityInYears = oMaturityInYears o
+  }
 f :: Erf a => Forward a
 f = Forward { fStrike = oStrike o, fMaturityInYears = oMaturityInYears o }
 
@@ -327,25 +397,29 @@ p :: N a => Market a -> Greek -> a
 getPv :: N a => Market a -> (a -> a) -> a
 -- p     = digiPricer o
 -- getPv = digiOptionPv o
-p     = blackSholesPricer o
-getPv = optionPv o
+-- p     = blackScholesPricer o
+-- getPv = optionPv o
+p     = noTouchPricer ot
+getPv = pay1Pv o
 
 greeksBump = map (\ i -> dvdx PV i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
 greeksBumpIntegrated = map (\ i -> dvdx' (const . integrated) mkt () i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
 greeksBumpMonteCarlo = map (\ i -> dvdx' (const . monteCarlo) mkt () i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
 greeksAnalytic = map (p mkt) [Delta, Vega, RhoDom, RhoFor, Theta, Gamma, Vanna] :: [Double]
+greeksAD = snd $ jacobianPvGreeks (flip p PV)
 
 newtype Percent = Percent Double
 instance Show Percent where show (Percent p) = printf "%.5f%%" p
-pct a b = Percent ((a / b - 1) * 100)
+pct a b
+  | a == b = Percent 0
+  | otherwise = Percent ((a / b - 1) * 100)
 
 pv :: Double
-[(pv,greeks)] =
-  R.jacobian' (\ [s,v,rd,rf,pd] ->
-    [ --fem
+(pv,greeks) = jacobianPvGreeks
+  fem
 -- σ=0.3, rd=0.05, rf=0.03, nx=500, nt=500, spot=[0.050..20.086], h=0.011976
 -- [0.00076%,-0.06512%,-0.01311%,0.01374%,-0.06819%]
-      integrated
+--       integrated
 -- λ> zipWith pct greeks greeksBump
 -- [-0.000%,0.014%,0.002%,-0.000%,0.013%] -- vanilla
 -- [-0.015%,0.008%,-0.021%,-0.015%,0.039%] -- digi
@@ -355,15 +429,19 @@ pv :: Double
 -- [-2.703%,-2.258%,-3.307%,-2.703%,-0.790%] -- digi
      -- digiPricer o
      -- [3.6661059215952516e-2,-0.2291316200997029,0.6795758158561364,-0.9165264803988129,3.744296366024975e-2] ~= greeksBump
-     -- blackSholesPricer o
+     -- blackScholesPricer o
      -- [0.5644849344925212,13.74789720598219,11.847533227133829,-14.112123362313032,-4.744637550015519] epsEq greeksAnalytic
+
+jacobianPvGreeks :: (forall a . N a => Market a -> a) -> (Double, [Double])
+jacobianPvGreeks pricer =
+  head $ R.jacobian' (\ [s,v,rd,rf,pd] ->
+    [ pricer
       (\ case
         Spot -> s
         Vol -> v
         RateDom -> rd
         RateFor -> rf
         PricingDate -> pd)
---       PV
     ])
     [mkt Spot, mkt Vol, mkt RateDom, mkt RateFor, mkt PricingDate]
 
@@ -373,11 +451,11 @@ pv :: Double
 mkt :: Fractional a => Input -> a
 mkt = \ case
     Spot -> 1
-    Vol -> 0.3
+    Vol -> 0.1
     RateDom -> 0.05
-    RateFor -> 0.03
+    RateFor -> 0.02
     PricingDate -> 0
--- p = blackSholesPricer
+-- p = blackScholesPricer
 --     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
 -- mkt = \ case
 --     Spot -> 300
@@ -534,7 +612,7 @@ plot = void $ GP.plotDefault $
   Plot2D.function Graph2D.lines
   (linearScale 1000 (oStrike o - 1, oStrike o + 1::Double))
   (\x ->
---     blackSholesPricer
+--     blackScholesPricer
 --       Option { oStrike = x, oMaturityInYears = 12/12, oDirection = Call } mkt PV
 --    p (m Spot (const x)) PV
 --    p (m RateDom (const x)) PV
@@ -571,7 +649,7 @@ hist bucket l =
 
 plot3d = plotFunc3d [] [] [0.5,0.51..1.5::Double] [0,0.1..1::Double]
   (\s mat ->
-    blackSholesPricer
+    blackScholesPricer
       Option { oStrike = s, oMaturityInYears = mat, oDirection = Call } (m Spot (const 1)) PV
   )
 
@@ -583,20 +661,21 @@ linInterpolate x (g:gs) = go g gs
       | otherwise = go c cs
 
 -- почему-то digital лучше чем vanilla?
--- и увеличение nx не увеличивает точность (хотя с exp(-3..3) vanilla уже
--- как в книжке, но digital по-прежнему лучше)
--- попробовать с triDiagSolve и большим nx
+-- увеличение nx желательно сопровождать увеличением nt
 
 fem :: forall a . N a => Market a -> a
 fem = fem' 500 500
 
 fem' :: forall a . N a => Int -> Int -> Market a -> a
 fem' nx nt market =
---  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toDouble σ) (toDouble rd) (toDouble rf) nx nt (toDouble minSpot) (toDouble maxSpot) (toDouble h) :: String) $
---    plotListStyle [] defaultStyle $ map (first exp) $
---   take 50 $
+--  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toDouble σ) (toDouble rd) (toDouble rf) nx nt (iToSpot 0) (iToSpot (nx+1)) (toDouble h) :: String) $
   linInterpolate (log $ market Spot) $
-  zipWith (,) (map iToLogSpot [1..nx]) (fst $ last iterations)
+--   (\ prices -> unsafePerformIO $ do
+--       plotListStyle [] defaultStyle $ map (\(logSpot, v) -> (toDouble $ exp logSpot, toDouble v)) prices
+--       pure prices)  $
+     [(iToLogSpot 0, 0)]
+  <> zipWith (,) (map iToLogSpot [1..nx]) (fst $ last iterations)
+  <> [(iToLogSpot (nx+1), 0)]
   -- LA.disp 1 $ LA.fromRows iterations
   where
     iterations = take (nt+1) (iterate ump1 (u0,0))
@@ -608,15 +687,17 @@ fem' nx nt market =
     θ = 1 -- 1=implicit, 0=explicit -- oscilates, even with 0.5
 
     ump1 :: ([a], Int) -> ([a], Int)
-    ump1 (um,i) =
+    ump1 (um,mi) =
       (solveTridiagTDMA
-      (m .+ k i*θ .* a_bs) ((m .- k i*(1-θ) .* a_bs) #> um), succ i)
---       (_i .+ k i*θ .* g_bs) ((_i .- k i*(1-θ) .* g_bs) #> um), succ i)
+      (m .+ k mi*θ .* a_bs) ((m .- k mi*(1-θ) .* a_bs) #> um), succ mi)
+--       (i .+ k mi*θ .* g_bs) ((i .- k mi*(1-θ) .* g_bs) #> um), succ mi)
 --     nx = 500 :: Int
 --     nt = 500 :: Int
     maxSpot, minSpot, h :: a
-    maxSpot = exp 3    -- с вот этими уже как в книжке
-    minSpot = exp (-3)
+--     (maxSpot, minSpot) = (otBarrier ot, exp (-3))
+    (maxSpot, minSpot) = (exp 3, otBarrier ot)
+--     (maxSpot, minSpot) = (exp 3, exp (-3))
+--     minSpot = exp (-3) -- с вот этими уже как в книжке
 --     maxSpot = oStrike o * 3 / 2
 --     minSpot = oStrike o     / 2
 --     maxSpot = max s0 $ spotAtT market 8 τ
@@ -628,21 +709,24 @@ fem' nx nt market =
     β = 1 -- market Vol / 2 -- ???
 --    k = τ / (toEnum nt-1) -- time step
     h = (log maxSpot - log minSpot) / (toEnum nx+1) -- log spot step
+    iToSpot = toDouble . exp . iToLogSpot
     iToLogSpot i = toEnum i * h + log minSpot
 
     u0 :: [a]
     u0 = [getPv market (const $ realToFrac $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [1..nx]]
 
     s, b, m, a_bs :: Tridiag a
+    -- FEM
     a_bs = (σ^2/2) .* s .+ (σ^2/2-rd+rf) .* b .+ rd .* m
     s = (1/h) .* tridiag nx (-1) 2 (-1)
     b = (1/2) .* tridiag nx (-1) 0   1
     m = (h/6) .* tridiag nx   1  4   1
 
-    g_bs = (σ^2/2) .* _r .+ (σ^2/2-rd+rf) .* _c .+ rd .* _i
-    _i = tridiag nx 0 1 0
-    _r = (1/h) .* s
-    _c = (1/h) .* b
+    -- FDM
+    g_bs = (σ^2/2) .* r .+ (σ^2/2-rd+rf) .* c .+ rd .* i
+    r = (1/h) .* s
+    c = (1/h) .* b
+    i = tridiag nx 0 1 0
 
 infixl 6 .+, .- -- same as (+)
 infixl 7 .*, #> -- same as (*)
