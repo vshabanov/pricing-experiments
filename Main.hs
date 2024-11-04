@@ -1,24 +1,30 @@
 {-# LANGUAGE LambdaCase, BangPatterns, ViewPatterns, MagicHash, RecordWildCards, ScopedTypeVariables #-}
-{-# OPTIONS_GHC -O2 -Wno-x-partial #-}
---module ZeroDeltaTest (main) where
+{-# OPTIONS_GHC -Wno-x-partial #-}
 
+module Main (module Main) where
+
+import Control.DeepSeq
 import Data.Number.Erf
 
 import Data.Array
 import Debug.Trace
 import Data.Monoid
 import Data.List.Split
-import Test.QuickCheck
 import Criterion.Main
 import Graphics.Gnuplot.Simple
 
+import qualified Graphics.Gnuplot.Frame as Frame
+import qualified Graphics.Gnuplot.Frame.Option as Opt
+import qualified Graphics.Gnuplot.Frame.OptionSet as Opts
 import qualified Graphics.Gnuplot.Advanced as GP
 import qualified Graphics.Gnuplot.MultiPlot as MultiPlot
 
 import qualified Graphics.Gnuplot.Graph as Graph
 
 import qualified Graphics.Gnuplot.Plot.TwoDimensional as Plot2D
+import qualified Graphics.Gnuplot.Plot.ThreeDimensional as Plot3D
 import qualified Graphics.Gnuplot.Graph.TwoDimensional as Graph2D
+import qualified Graphics.Gnuplot.Graph.ThreeDimensional as Graph3D
 import Graphics.Gnuplot.Plot.TwoDimensional (linearScale, )
 
 import qualified Graphics.Gnuplot.LineSpecification as LineSpec
@@ -32,15 +38,9 @@ import Data.Bifunctor
 -- import qualified Numeric.LAPACK.Vector as LV
 import qualified Data.Array.Comfort.Shape as Shape
 import qualified Numeric.LinearAlgebra as LA
-import qualified System.Random.MWC as MWC
-import qualified System.Random.MWC.Distributions as MWC
 import Control.Monad.ST
 import Control.Monad
 import Data.List
-import qualified System.Random.SplitMix as SplitMix
-import qualified Control.Monad.State.Strict as State.Strict
-import Control.Monad.Identity
-import System.Random.Stateful (StatefulGen(..))
 import Control.Concurrent
 import Control.Concurrent.Async
 import System.IO.Unsafe
@@ -52,16 +52,14 @@ import qualified Numeric.AD.Mode.Reverse as R
 import qualified Numeric.AD.Internal.Reverse as R
 import qualified Numeric.AD.Jacobian as J
 
-import GHC.Word
-import GHC.Float
-import GHC.Num.Primitives (wordReverseBits#)
-import GHC.Prim (word2Double#, (*##))
-
-import Control.Monad.ST
-import qualified Data.Vector.Mutable as M
-import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 
+import System.Process
+
+import Random
+import Tridiag
+import Control.Concurrent.Chan
+import Control.Concurrent.Async
 
 data Greek
   = PV
@@ -244,6 +242,16 @@ spotAtT market ϵ τ =
     rd = market RateDom
     rf = market RateFor
 
+spotPath market dτ es =
+  map ((s0 *) . exp) $
+  scanl' (+) 0 [(μ̂ - σ^2/2)*dτ + σ*ϵ*sqrt dτ | ϵ <- es]
+  where
+    μ̂ = rd - rf
+    s0 = market Spot
+    σ = market Vol
+    rd = market RateDom
+    rf = market RateFor
+
 pay1Pv :: N a => Option a -> Market a -> (a -> a) -> a
 pay1Pv o market _ =
   exp (-rd*τ)
@@ -279,8 +287,11 @@ scale s f market what = s * f market what
 toDouble :: N a => a -> Double
 toDouble = realToFrac
 
+instance NFData (R.Reverse s a) where
+  rnf a = seq a ()
+
 -- | extended Num functions
-class (Show a, Enum a, Ord a, Real a, Erf a) => N a where
+class (NFData a, Show a, Enum a, Ord a, Real a, Erf a) => N a where
   step :: a -> a
 --   step = (\x -> if x > 0 then 1 else 0)
   step x = 1 / (1 + exp (-k*x))
@@ -322,9 +333,45 @@ treeSum l = case splitSum l of -- $ sort l of
 
 type Market a = Input -> a
 
+parMap :: (NFData a, NFData b) => Int -> (a -> b) -> [a] -> [b]
+parMap nThreads f xs = unsafePerformIO $ do
+  c <- newChan
+  let grain = 100
+      writer = do
+        forM_ (chunksOf grain xs) $ \ chunk ->
+          chunk `deepseq` writeChan c (Just chunk)
+        forM_ [1..nThreads] $ const $ writeChan c Nothing
+      reader acc = do
+        chunk <- readChan c
+        case chunk of
+          Nothing -> return $ concat acc
+          Just c ->
+            let r = map f c in r `deepseq` reader (r:acc)
+  fmap concat $ withAsync writer $ const $
+    forConcurrently [1..nThreads] $ const $ reader []
+-- map works faster than parMap :)
+-- looks like a lot of fusion is lost, and more pressure on ram is added
+
 monteCarlo :: N a => Market a -> a
 monteCarlo mkt =
-  treeSum [getPv mkt (spotAtT mkt (realToFrac ϵ)) | ϵ <- gaussian n] / toEnum n
+--   unsafePerformIO $
+--  fmap sum $ forConcurrently (splitMixSplits threads) $ seqpure .
+    (/ toEnum n) . treeSum . map (pv . spotPath mkt dt . map realToFrac)
+    $ chunkedGaussian nt (n `div` threads)
+  where
+    seqpure a = a `seq` pure a
+    pv xs = product [step (otBarrier ot - x) | x <- xs]
+      * getPv mkt (const $ last xs)
+    threads = 1
+    nt = 500
+    n = 5000
+    τ = oMaturityInYears o - mkt PricingDate
+    dt = τ / toEnum nt
+    s0 = mkt Spot
+
+_monteCarlo :: N a => Market a -> a
+_monteCarlo mkt =
+  treeSum [getPv mkt (spotAtT mkt (realToFrac ϵ)) | ϵ <- gaussianQuasiRandom n] / toEnum n
 --   unsafePerformIO $
 --   fmap sum $ forConcurrently (splitMixSplits threads) $ \ sm ->
 --     pure $! treeSum [getPv mkt (spotAtT mkt (realToFrac ϵ)) | ϵ <- gaussianSM tn sm] / fromRational n
@@ -339,7 +386,7 @@ monteCarlo mkt =
     -- 8 0.032%
     tn = n `div` threads
     n :: Num a => a
-    n = 10000
+    n = 1000000
 
 _integrated :: N a => Market a -> a
 _integrated mkt =
@@ -364,8 +411,9 @@ integrated :: N a => Market a -> a
 integrated = integrated' $ truncate (10/width :: Double)
 
 -- doesn't help
+{-# SPECIALIZE monteCarlo :: Market Double -> Double #-}
 {-# SPECIALIZE integrated' :: Int -> Market Double -> Double #-}
--- {-# SPECIALIZE fem' :: Int -> Int -> Market Double -> Double #-}
+{-# SPECIALIZE fem' :: Int -> Int -> Market Double -> Double #-}
 
 integrated' :: N a => Int -> Market a -> a
 integrated' n mkt = realToFrac step * treeSum
@@ -379,14 +427,14 @@ integrated' n mkt = realToFrac step * treeSum
 o :: Erf a => Option a
 o = Option
   { oStrike =
-    1.2
+    1
 --    forwardRate mkt (oMaturityInYears o)
   , oMaturityInYears = 1 -- 0.1/365
   , oDirection = Call }
 ot :: Erf a => OneTouch a
 ot = OneTouch
-  { otBarrier = 0.9
-  , otBarrierPosition = Lower
+  { otBarrier = 1.1
+  , otBarrierPosition = Upper
   , otPayOn = PayOnEnd
   , otMaturityInYears = oMaturityInYears o
   }
@@ -407,6 +455,7 @@ greeksBumpIntegrated = map (\ i -> dvdx' (const . integrated) mkt () i 0.00001) 
 greeksBumpMonteCarlo = map (\ i -> dvdx' (const . monteCarlo) mkt () i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
 greeksAnalytic = map (p mkt) [Delta, Vega, RhoDom, RhoFor, Theta, Gamma, Vanna] :: [Double]
 greeksAD = snd $ jacobianPvGreeks (flip p PV)
+greeksADMonteCarlo = snd $ jacobianPvGreeks monteCarlo
 
 newtype Percent = Percent Double
 instance Show Percent where show (Percent p) = printf "%.5f%%" p
@@ -519,95 +568,6 @@ mcError, integratedError :: N a => a
 mcError = (1 - monteCarlo mkt / p mkt PV) * 100
 integratedError = (1 - integrated mkt / p mkt PV) * 100
 
-newtype DummyGen = DummyGen ()
-
-instance StatefulGen DummyGen (State.Strict.State SplitMix.SMGen) where
-   uniformWord64 _ = State.Strict.StateT $ Identity . SplitMix.nextWord64
-   uniformWord32 _ = State.Strict.StateT $ Identity . SplitMix.nextWord32
-   uniformShortByteString = error "uniformShortByteString SMGen is not implemented" -- added to remve MonadIO constraint from the default implementation
-
--- replicateM is 10-20% faster in GHCi and slightly faster in -O2 microbenchmark
-replicateAcc n act = go n []
-  where
-    go 0 acc = pure $ reverse acc
-    go n acc = do
-      !x <- act
-      go (n-1) (x:acc)
-
-gaussianSM n =
---  runIdentity . State.Strict.evalStateT (replicateM n $ MWC.standard $ DummyGen ())
-  take n . map invnormcdf . unfoldr (Just . SplitMix.nextDouble)
-splitMixSplits n = take n $ split [SplitMix.mkSMGen 1337]
-  where
-    split gs = ss <> split ss
-      where ss = concat [[a,b] | g <- gs, let (a,b) = SplitMix.splitSMGen g]
-
--- doesn't look to approach 1, more like jumping around 0.2-0.7
-lawOfIteratedLogarithm = sum (take n $ map (\x -> (toEnum . fromEnum) x*2-1) $ unfoldr (Just . SplitMix.bitmaskWithRejection64' 1) (SplitMix.mkSMGen 1337))
-  / sqrt (2*n * log (log n))
-  where
-    n :: Num a => a
-    n = 5000000
-
-mean [] = error "mean: empty list"
-mean x  = sum x / toEnum (length x)
-
--- https://mathworld.wolfram.com/RandomWalk1-Dimensional.html
---   proportional to sqrt (2N/pi)
--- https://mathworld.wolfram.com/RandomWalk2-Dimensional.html
---   proportional to sqrt N
-brownianDistance = mean distances / sqrt n -- usually around 0.9, not 1.0
-  where
-    n :: Num a => a
-    n = 1000
-    nPaths = 10000
---     dist path = sqrt $ x^2 + y^2 + z^2
---       where
---         (Sum x, Sum y, Sum z) =
---           mconcat
---           [(Sum $ sin θ * cos φ, Sum $ sin θ * sin φ, Sum $ cos θ)
---            | [(pi*) -> θ, (2*pi*) -> φ] <- chunksOf 2 path]
-    dist path = sqrt $ x^2 + y^2
-      where
-        (Sum x, Sum y) =
-          mconcat
-          [(Sum $ sin φ, Sum $ cos φ)
-           | [(pi*) -> θ, (2*pi*) -> φ] <- chunksOf 2 path]
-    distances =
-      map dist $ take nPaths $ chunksOf (2*n)
-      $ unfoldr (Just . SplitMix.nextDouble) (SplitMix.mkSMGen 133711)
-
-gaussian :: Int -> [Double]
-gaussian n
- =
-    map (invnormcdf . corput2) [1..toEnum n]
---     take n $ map invnormcdf $ unfoldr (Just . SplitMix.nextDouble) (SplitMix.mkSMGen 1337)
-    -- nextDouble [0..1), а нам нужно [0..1]
---    runIdentity $ State.Strict.evalStateT (replicateM n $ MWC.standard $ DummyGen ()) (SplitMix.mkSMGen 1337)
-    --   1k      10k    100k     1mio    10mio
-    --  0.18%   0.39    0.31     0.084   -0.007
-
---     runST $ replicateM n . MWC.standard =<< MWC.create
-    --   1k      10k    100k     1mio    10mio (goes up as LAPACK)
-    -- -5.37%  -0.88   -0.13    0.014   -0.059
---    take n $ map invnormcdf $ randomRs (0.0,1.0) (mkStdGen 137)
-    -- about 2x bigger difference than with LAPACK on average
-    -- 2M error is bigger than 1M error!
-    -- while LAPACK is slowly decreasing (but 10M error is bigger again
-    -- 0.064% -> 0.0512% -> 0.07834%
-  -- = LV.toList $ LV.random LV.Normal (Shape.Range 1 n) (toEnum 137)
---   = LA.toList $ LA.randomVector 137 LA.Gaussian n
---     ^^ seems to be not thread-safe and doesn't look good on small sample size
-
---    1
---   1 1
---  1 2 1
--- 1 3 3 1
-pascalTriangleRow n
-  | n <= 1 = [1]
-  | otherwise = let p = pascalTriangleRow (n-1) in
-      zipWith (+) ([0]<>p) (p<>[0])
-
 plot = void $ GP.plotDefault $
   Plot2D.function Graph2D.lines
   (linearScale 1000 (oStrike o - 1, oStrike o + 1::Double))
@@ -627,31 +587,34 @@ plot = void $ GP.plotDefault $
   [(spotAtT mkt x (oMaturityInYears o), 0.5::Double)
   |x <- [-0.2,-0.199..0.2::Double]]
 
-plotp = plotListStyle [] defaultStyle
-  [(toEnum i :: Double, x / sum p) | (i,x) <- zip [start..end] (drop start p)]
-  where
-    p :: [Rational]
-    p = pascalTriangleRow n -- sum [Double] overlows at 1100
-    n = 2000
-    plotN = 101
-    start = (n-plotN)`div`2
-    end = start + plotN - 1
-
-plotg = plotListStyle [] defaultStyle-- {plotType = HiSteps}
-  (hist 0.001
---   $ map (\ e -> spotAtT mkt e 0.5)
-   $ gaussian 500000)
-hist :: Double -> [Double] -> [(Double, Double)]
-hist bucket l =
-  map (\ (b,c) -> (toEnum b * bucket, toEnum c / toEnum (length l))) $
-  IntMap.toList $ IntMap.fromListWith (+)
-  [(floor (x / bucket) :: Int, 1::Int) | x <- l]
-
-plot3d = plotFunc3d [] [] [0.5,0.51..1.5::Double] [0,0.1..1::Double]
-  (\s mat ->
-    blackScholesPricer
-      Option { oStrike = s, oMaturityInYears = mat, oDirection = Call } (m Spot (const 1)) PV
+plot3d = -- plotFunc3d [Custom "data" ["lines"],
+--                      Custom "surface" [], Custom "hidden3d" []] [Plot3dType Surface]
+  plotMeshFun
+         [0.5,0.51..1.5::Double] [0,0.1..1::Double]
+  (\s pd ->
+    blackScholesPricer o (modify PricingDate (const pd) $ m Spot (const s)) PV
   )
+
+plotMeshFun xs ys f = plotMesh [[(x, y, f x y) | x <- xs] | y <- ys]
+
+plotMesh :: [[(Double, Double, Double)]] -> IO ()
+plotMesh rows = do
+  let dat = "mesh.dat"
+      script = "script.plot"
+  writeFile dat $ unlines [unlines [unwords $ map show [y,x,v] | (x,y,v) <- r] | r <- rows]
+  writeFile script $ unlines $
+    ["set view 60, 60"
+--     "set view 90, 90"
+    ,"set key off"
+    ,"unset colorbox"
+--     ,"set contour both"
+    ,"set pm3d depthorder border lc 'black' lw 0.33"
+    ,concat ["splot \"", dat, "\" ",
+      -- "with lines palette lw 0.33"
+      "with pm3d"
+     ]
+    ]
+  void $ spawnCommand $ "gnuplot " <> script
 
 linInterpolate x (g:gs) = go g gs
   where
@@ -664,20 +627,42 @@ linInterpolate x (g:gs) = go g gs
 -- увеличение nx желательно сопровождать увеличением nt
 
 fem :: forall a . N a => Market a -> a
-fem = fem' 500 500
+fem = fem' 100 100
 
 fem' :: forall a . N a => Int -> Int -> Market a -> a
 fem' nx nt market =
 --  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toDouble σ) (toDouble rd) (toDouble rf) nx nt (iToSpot 0) (iToSpot (nx+1)) (toDouble h) :: String) $
   linInterpolate (log $ market Spot) $
---   (\ prices -> unsafePerformIO $ do
---       plotListStyle [] defaultStyle $ map (\(logSpot, v) -> (toDouble $ exp logSpot, toDouble v)) prices
---       pure prices)  $
-     [(iToLogSpot 0, 0)]
-  <> zipWith (,) (map iToLogSpot [1..nx]) (fst $ last iterations)
-  <> [(iToLogSpot (nx+1), 0)]
+  (\ prices -> unsafePerformIO $ do
+      let toGraph = map (\(logSpot, v) -> (toDouble $ exp logSpot, toDouble v))
+      -- plotListStyle [] defaultStyle $ toGraph prices
+--       GP.plotDefault
+--         $ Frame.cons
+--           (Opts.grid True $
+--            Opts.viewMap $
+-- --            Opts.view 10 10 1 1 $
+--            Opts.key False $
+--            Opts.add (Opt.custom "hidden3d" "") [] $
+--            Opts.deflt)
+--         $ -- Graph3D.lineSpec (LineSpec.title "" LineSpec.deflt) <$>
+--           Plot3D.mesh
+      plotMesh
+          [map (\(x,v) -> (x, toDouble $ iToT t, v)) $ toGraph $ addLogSpot l
+          |(l,t) <- iterations]
+--         foldMap
+--         (noTitle .
+--           Plot2D.list Graph2D.lines . toGraph . addLogSpot . fst) iterations
+--         <>
+--         noTitle (Plot2D.list Graph2D.dots [(iToSpot i, 1.05) | i <- [0..nx]])
+      pure prices)
+  $ addLogSpot (fst $ last iterations)
   -- LA.disp 1 $ LA.fromRows iterations
   where
+    noTitle x = fmap (Graph2D.lineSpec (LineSpec.title "" LineSpec.deflt)) x
+    addLogSpot iteration =
+         [(iToLogSpot 0, 0)]
+      <> zipWith (,) (map iToLogSpot [1..nx]) iteration
+      <> [(iToLogSpot (nx+1), 0)]
     iterations = take (nt+1) (iterate ump1 (u0,0))
     τ = oMaturityInYears o - market PricingDate
     σ = market Vol
@@ -693,11 +678,9 @@ fem' nx nt market =
 --       (i .+ k mi*θ .* g_bs) ((i .- k mi*(1-θ) .* g_bs) #> um), succ mi)
 --     nx = 500 :: Int
 --     nt = 500 :: Int
-    maxSpot, minSpot, h :: a
---     (maxSpot, minSpot) = (otBarrier ot, exp (-3))
-    (maxSpot, minSpot) = (exp 3, otBarrier ot)
---     (maxSpot, minSpot) = (exp 3, exp (-3))
---     minSpot = exp (-3) -- с вот этими уже как в книжке
+    (minSpot, maxSpot) = (exp (-3), otBarrier ot)
+--     (minSpot, maxSpot) = (otBarrier ot, exp 3)
+--     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
 --     maxSpot = oStrike o * 3 / 2
 --     minSpot = oStrike o     / 2
 --     maxSpot = max s0 $ spotAtT market 8 τ
@@ -727,87 +710,6 @@ fem' nx nt market =
     r = (1/h) .* s
     c = (1/h) .* b
     i = tridiag nx 0 1 0
-
-infixl 6 .+, .- -- same as (+)
-infixl 7 .*, #> -- same as (*)
-
--- scale .* mat = realToFrac scale * mat
-
-t@(Tridiag sa l d u) #> vec
-  | length vec /= sa
-  = err ["Matrix size /= vector size, ", show t, " ", show vec]
-  | otherwise
-  = case vec of
-      []  -> []
-      [x] -> [d*x]
-      _   ->
-           [               d * v!0 + u * v!1]
-        <> [l * v!(i-1)  + d * v!i + u * v!(i+1) | i <- [1..sa-2]]
-        <> [l * v!(sa-2) + d * v!(sa-1)]
-  where
-    v = listArray (0,sa-1) vec
-
-(.*) :: Num a => a -> Tridiag a -> Tridiag a
-scale .* Tridiag s l d u = Tridiag s (scale*l) (scale*d) (scale*u)
-
-liftTridiag2 :: N a => (a -> a -> a) -> Tridiag a -> Tridiag a -> Tridiag a
-liftTridiag2 f a@(Tridiag sa la da ua) b@(Tridiag sb lb db ub)
-  | sa /= sb
-  = err ["Mismatch in tridiag sizes ", show a, ", ", show b]
-  | otherwise
-  = Tridiag sa (f la lb) (f da db) (f ua ub)
-a .+ b = liftTridiag2 (+) a b
-a .- b = liftTridiag2 (-) a b
-
-tridiag = Tridiag
-
-data Tridiag a
-  = Tridiag
-    { tridiagSize :: Int
-    , tridiagL :: a
-    , tridiagD :: a
-    , tridiagU :: a
-    }
-  deriving Show
-
-tridiagVectors (Tridiag s l d u) =
-  (replicate (s-1) l
-  ,replicate  s    d
-  ,replicate (s-1) u)
-
-err x = error $ mconcat x
-
-solveTridiagTDMA :: N a => Tridiag a -> [a] -> [a]
-solveTridiagTDMA t@(Tridiag _ l d u)
-  | d < l + u
-  = err ["solveTridiagTDMA: matrix ", show t, " is not diagonally dominant"]
-    -- can produce wildly different results from solveTridiagLAGeneric
-    -- for non-diagonally dominant matrices
-  | otherwise
-  = tdmaSolver ([0] <> ll) ld (lu <> [0])
-  where
-    (ll, ld, lu) = tridiagVectors t
-
-solveTridiagLATridiag t vec =
-  LA.toList $ head $ LA.toColumns
-    $ LA.triDiagSolve (LA.fromList ll) (LA.fromList ld) (LA.fromList lu)
-    $ LA.fromColumns [LA.fromList vec]
-  where
-    (ll, ld, lu) = tridiagVectors t
-
-solveTridiagLAGeneric (Tridiag s l d u) vec =
-  LA.toList $ laTridiag s l d u LA.<\> LA.fromList vec
-
-
-laTridiag size l d u =
-  (LA.dropRows 1 (diag u) LA.=== zeroRow)
-  +
-  diag d
-  +
-  (zeroRow LA.=== LA.subMatrix (0,0) (size-1,size) (diag l))
-  where
-    diag x = LA.diagl $ replicate size x
-    zeroRow = LA.row $ replicate size 0
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
 main = defaultMain
@@ -889,107 +791,3 @@ axis([0 length(N) -1 1])
 xlabel('N'); ylabel('Error')
 legend('MC error','lower bound','upper bound')
 -}
-
--- https://en.wikipedia.org/wiki/Van_der_Corput_sequence
-corput :: Int -> Int -> Double
-corput base n = go n rBase 0.0
-  where
-    rBase = recip $ toEnum base
-    go !n !bk !q
-      | n > 0 = go (n `div` base) (bk * rBase) (q + toEnum (n `mod` base)*bk)
-      | otherwise = q
-
--- https://www.pbr-book.org/3ed-2018/Sampling_and_Reconstruction/The_Halton_Sampler
-corput2 :: Word -> Double
-corput2 (W# w) = (D# (word2Double# (wordReverseBits# w))) * 0x1p-64
--- λ> and [corput2 i == corput 2 (fromEnum i) | i <- [1..1000000]]
--- True
-
-data SolveTridiagInputs a
-  = SolveTridiagInputs
-    { stiTridiag :: Tridiag a
-    , stiVector :: [a]
-    }
-  deriving Show
-
-instance Arbitrary (SolveTridiagInputs Double) where
-  arbitrary = do
-    tridiagSize <- chooseInt (5, 50)
-    let e = choose (1,10)
-        v s = vectorOf s e
-    tridiagL <- e
-    tridiagU <- e
-    let m = tridiagL + tridiagU
-    tridiagD <- choose (m, 2*m) -- diagonally dominant
-    stiVector <- vectorOf tridiagSize e
-    pure $ SolveTridiagInputs{stiTridiag=Tridiag{..}, ..}
-
-prop_solveTridiag SolveTridiagInputs{..} =
-  and $ zipWith (epsEq 1e-11)
-    (solveTridiagTDMA stiTridiag stiVector)
---     (solveTridiagLAGeneric stiTridiag stiVector)
-    (solveTridiagLATridiag stiTridiag stiVector)
-
-data TestTridiagInputs a
-  = TestTridiagInputs
-    { ttiA :: [a]
-    , ttiB :: [a]
-    , ttiC :: [a]
-    , ttiD :: [a]
-    }
-  deriving Show
-
-instance Arbitrary (TestTridiagInputs Double) where
-  arbitrary = do
-    size <- chooseInt (5, 50)
-    let v s = vectorOf s $ choose (1,10)
-    ttiA <- v (size-1)
-    ttiB <- v size
-    ttiC <- v (size - 1)
-    ttiD <- v size
-    pure $ TestTridiagInputs{..}
-
-prop_tridiag TestTridiagInputs{..} = and $ zipWith (epsEq 5e-12) qf la
-  where
-    qf = tdmaSolver ([0]<>ttiA) ttiB (ttiC<>[0]) ttiD
-    la = LA.toList $ head $ LA.toColumns
-      $ LA.triDiagSolve (LA.fromList ttiA) (LA.fromList ttiB) (LA.fromList ttiC)
-      $ LA.fromColumns [LA.fromList ttiD]
-
-epsEq e a b = eps a b < e
-eps a b = abs (a-b) / max (abs a) (abs b)
-
--- https://hackage.haskell.org/package/quantfin-0.2.0.0/docs/src/Quant-Math-Utilities.html#tdmaSolver
--- | Tridiagonal matrix solver.  Pretty simple.
-tdmaSolver :: (Fractional a, Ord a) => [a] -> [a] -> [a] -> [a] -> [a]
-tdmaSolver aL bL cL dL = V.toList $
-    let [a,b,c,d] = map V.fromList [aL,bL,cL,dL] in
-        runST $ do
-            c' <- V.thaw c
-            M.write c' 0 (V.head c / V.head b)
-            forM_ [1..V.length c-1] $ \x -> do
-                let ai = a V.! x
-                    bi = b V.! x
-                    ci = c V.! x
-                ci1' <- M.read c' (x-1)
-                M.write c' x $ ci / (bi-ai*ci1')
-            cf <- V.unsafeFreeze c'
-            d' <- V.thaw d
-            M.write d' 0 (V.head d / V.head b)
-            forM_ [1..V.length d-1] $ \x -> do
-                let ai  = a  V.! x
-                    bi  = b  V.! x
-                    di  = d  V.! x
-                    ci1 = cf V.! (x-1)
-                di1' <- M.read d' (x-1)
-                M.write d' x $ (di-ai*di1') / (bi-ai*ci1)
-            df <- V.unsafeFreeze d'
-            xn <- M.new $ V.length d
-            M.write xn (V.length d-1) $ V.last df
-            forM_ (reverse [0..V.length df-2]) $ \ x-> do
-                let ci = cf V.! x
-                    di = df V.! x
-                xi1 <- M.read xn $ x+1
-                M.write xn x $ di - ci*xi1
-            V.unsafeFreeze xn
-{-# INLINE tdmaSolver #-}
