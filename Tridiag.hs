@@ -7,6 +7,8 @@ module Tridiag
   , solveTridiagLATridiag
   , solveTridiagLAGeneric
   , laTridiag
+  , tridiagFromLists
+  , trimTridiag, tridiagFrom2x2Elements
   )
 where
 
@@ -18,88 +20,134 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 
 import qualified Numeric.LinearAlgebra as LA
+
 import Test.QuickCheck
+import Text.Printf
 
 infixl 6 .+, .- -- same as (+)
 infixl 7 .*, #> -- same as (*)
 
 -- scale .* mat = realToFrac scale * mat
 
+(#>) :: (Show a, Num a) => Tridiag a -> [a] -> [a]
 t@(Tridiag sa l d u) #> vec
   | length vec /= sa
-  = err ["Matrix size /= vector size, ", show t, " ", show vec]
+  = err ["Matrix size /= vector size, ", show sa, " /= ", show (length vec)]
   | otherwise
   = case vec of
-      []  -> []
-      [x] -> [d*x]
+      []  -> [1]
+      [x] -> [d!0 * x]
       _   ->
-           [               d * v!0 + u * v!1]
-        <> [l * v!(i-1)  + d * v!i + u * v!(i+1) | i <- [1..sa-2]]
-        <> [l * v!(sa-2) + d * v!(sa-1)]
+           [                d!i * v!i + u!i * v!(i+1) | i <- [0]]
+        <> [l!i * v!(i-1) + d!i * v!i + u!i * v!(i+1) | i <- [1..sa-2]]
+        <> [l!i * v!(i-1) + d!i * v!i                 | i <-    [sa-1]]
   where
     v = listArray (0,sa-1) vec
 
 (.*) :: Num a => a -> Tridiag a -> Tridiag a
-scale .* Tridiag s l d u = Tridiag s (scale*l) (scale*d) (scale*u)
+scale .* Tridiag size l d u = Tridiag size (s l) (s d) (s u)
+  where
+    s = fmap (scale *)
 
 liftTridiag2 :: Show a => (a -> a -> a) -> Tridiag a -> Tridiag a -> Tridiag a
 liftTridiag2 f a@(Tridiag sa la da ua) b@(Tridiag sb lb db ub)
   | sa /= sb
   = err ["Mismatch in tridiag sizes ", show a, ", ", show b]
   | otherwise
-  = Tridiag sa (f la lb) (f da db) (f ua ub)
+  = Tridiag sa (z la lb) (z da db) (z ua ub)
+  where
+    z a b = accum f a (assocs b)
 a .+ b = liftTridiag2 (+) a b
 a .- b = liftTridiag2 (-) a b
 
-tridiag = Tridiag
+tridiag :: Int -> a -> a -> a -> Tridiag a
+tridiag s l d u = tridiagFromLists s (repeat l) (repeat d) (repeat u)
+
+tridiagFromLists s l d u = Tridiag s
+  (listArray (1,s-1) l) -- no first row
+  (listArray (0,s-1) d)
+  (listArray (0,s-2) u) -- no last row
+
+trimTridiag :: Num a => Int -> Int -> Tridiag a -> Tridiag a
+trimTridiag top bottom (Tridiag s l d u)
+  | newSize < 0 = error $
+    printf "trimTridiag %d %d [matrix of size %d]: can't trim more than the size of the matrix" top bottom s
+  | newSize == 0 = tridiag 0 0 0 0
+  | otherwise = tridiagFromLists newSize
+    (drop top $ elems l)
+    (drop top $ elems d)
+    (drop top $ elems u)
+  where
+    newSize = s - top - bottom
+
+-- | N+1 tridiagonal matrix from N 2x2 elements
+--   a0    b0
+--   c0    d0+a1  b1
+--         c1     d1+a2 b2
+--                c2    d2
+tridiagFrom2x2Elements :: Num a => [(a,a,a,a)] -> Tridiag a
+tridiagFrom2x2Elements es = tridiagFromLists (length es+1)
+  cs
+  (zipWith (+) (as <> [0]) ([0] <> ds))
+  bs
+  where
+    as = [a | (a,_,_,_) <- es]
+    bs = [b | (_,b,_,_) <- es]
+    cs = [c | (_,_,c,_) <- es]
+    ds = [d | (_,_,_,d) <- es]
+
 
 data Tridiag a
   = Tridiag
     { tridiagSize :: Int
-    , tridiagL :: a
-    , tridiagD :: a
-    , tridiagU :: a
+    , tridiagL :: Array Int a
+    , tridiagD :: Array Int a
+    , tridiagU :: Array Int a
     }
   deriving Show
-
-tridiagVectors (Tridiag s l d u) =
-  (replicate (s-1) l
-  ,replicate  s    d
-  ,replicate (s-1) u)
 
 err x = error $ mconcat x
 
 solveTridiagTDMA :: (Fractional a, Ord a, Show a) => Tridiag a -> [a] -> [a]
 solveTridiagTDMA t@(Tridiag _ l d u)
-  | d < l + u
-  = err ["solveTridiagTDMA: matrix ", show t, " is not diagonally dominant"]
+  | not (diagonallyDominant t)
+  = err ["solveTridiagTDMA: matrix is not diagonally dominant"]
     -- can produce wildly different results from solveTridiagLAGeneric
     -- for non-diagonally dominant matrices
   | otherwise
-  = tdmaSolver ([0] <> ll) ld (lu <> [0])
-  where
-    (ll, ld, lu) = tridiagVectors t
+  = tdmaSolver ([0] <> elems l) (elems d) (elems u <> [0])
 
-solveTridiagLATridiag t vec =
+-- https://en.wikipedia.org/wiki/Diagonally_dominant_matrix
+diagonallyDominant (Tridiag s l d u)
+  | s <= 1 = True
+  | otherwise = and $
+    [abs (d!0) >= abs (u!0)
+    ,abs (d!(s-1)) >= abs (l!(s-1))]
+    <>
+    [abs (d!i) >= abs (u!i) && abs (d!i) >= abs (l!i) | i <- [1..s-2]]
+
+solveTridiagLATridiag (Tridiag _ l d u) vec =
   LA.toList $ head $ LA.toColumns
-    $ LA.triDiagSolve (LA.fromList ll) (LA.fromList ld) (LA.fromList lu)
+    $ LA.triDiagSolve (v l) (v d) (v u)
     $ LA.fromColumns [LA.fromList vec]
   where
-    (ll, ld, lu) = tridiagVectors t
+    v = LA.fromList . elems
 
-solveTridiagLAGeneric (Tridiag s l d u) vec =
-  LA.toList $ laTridiag s l d u LA.<\> LA.fromList vec
+solveTridiagLAGeneric t vec =
+  LA.toList $ laTridiag t LA.<\> LA.fromList vec
 
-
-laTridiag size l d u =
-  (LA.dropRows 1 (diag u) LA.=== zeroRow)
+laTridiag (Tridiag size l d u) =
+  ((zeroCol LA.||| diag u)
+            LA.=== zeroRow)
   +
   diag d
   +
-  (zeroRow LA.=== LA.subMatrix (0,0) (size-1,size) (diag l))
+  (zeroRow LA.===
+   (diag l LA.||| zeroCol))
   where
-    diag x = LA.diagl $ replicate size x
-    zeroRow = LA.row $ replicate size 0
+    diag = LA.diagl . elems
+    zeroRow = LA.row $ replicate  size    0
+    zeroCol = LA.col $ replicate (size-1) 0
 
 
 data SolveTridiagInputs a
@@ -111,15 +159,14 @@ data SolveTridiagInputs a
 
 instance Arbitrary (SolveTridiagInputs Double) where
   arbitrary = do
-    tridiagSize <- chooseInt (5, 50)
+    size <- chooseInt (5, 50)
     let e = choose (1,10)
-        v s = vectorOf s e
-    tridiagL <- e
-    tridiagU <- e
-    let m = tridiagL + tridiagU
-    tridiagD <- choose (m, 2*m) -- diagonally dominant
-    stiVector <- vectorOf tridiagSize e
-    pure $ SolveTridiagInputs{stiTridiag=Tridiag{..}, ..}
+    l <- e
+    u <- e
+    let m = l + u
+    d <- choose (m, 2*m) -- diagonally dominant
+    stiVector <- vectorOf size e
+    pure $ SolveTridiagInputs{stiTridiag=tridiag size l d u, ..}
 
 prop_solveTridiag SolveTridiagInputs{..} =
   and $ zipWith (epsEq 1e-11)

@@ -333,8 +333,8 @@ treeSum l = case splitSum l of -- $ sort l of
 
 type Market a = Input -> a
 
-parMap :: (NFData a, NFData b) => Int -> (a -> b) -> [a] -> [b]
-parMap nThreads f xs = unsafePerformIO $ do
+parMapSum :: (Num b, NFData a, NFData b) => Int -> (a -> b) -> [a] -> b
+parMapSum nThreads f xs = unsafePerformIO $ do
   c <- newChan
   let grain = 100
       writer = do
@@ -344,19 +344,23 @@ parMap nThreads f xs = unsafePerformIO $ do
       reader acc = do
         chunk <- readChan c
         case chunk of
-          Nothing -> return $ concat acc
+          Nothing -> return $! treeSum acc
           Just c ->
-            let r = map f c in r `deepseq` reader (r:acc)
-  fmap concat $ withAsync writer $ const $
+            let r = treeSum $ map f c in r `deepseq` reader (r:acc)
+  fmap sum $ withAsync writer $ const $
     forConcurrently [1..nThreads] $ const $ reader []
--- map works faster than parMap :)
--- looks like a lot of fusion is lost, and more pressure on ram is added
+-- in GHCi map works faster than parMap or forConcurrently :)
+-- despite they use more CPU
+-- ByteCode thing?
+-- parMap лучше чем forConcurrently, но возможно из-за неравномерной загрузки
 
 monteCarlo :: N a => Market a -> a
 monteCarlo mkt =
 --   unsafePerformIO $
---  fmap sum $ forConcurrently (splitMixSplits threads) $ seqpure .
-    (/ toEnum n) . treeSum . map (pv . spotPath mkt dt . map realToFrac)
+--   fmap sum $ forConcurrently (splitMixSplits threads) $ seqpure .
+  -- Jacobian похоже тоже надо внутри нитки делать
+  -- зависает в каких-то блокировках
+    (/ toEnum n) . parMapSum 8 (pv . spotPath mkt dt . map realToFrac)
     $ chunkedGaussian nt (n `div` threads)
   where
     seqpure a = a `seq` pure a
@@ -364,7 +368,7 @@ monteCarlo mkt =
       * getPv mkt (const $ last xs)
     threads = 1
     nt = 500
-    n = 5000
+    n = 50000
     τ = oMaturityInYears o - mkt PricingDate
     dt = τ / toEnum nt
     s0 = mkt Spot
@@ -427,7 +431,7 @@ integrated' n mkt = realToFrac step * treeSum
 o :: Erf a => Option a
 o = Option
   { oStrike =
-    1
+    1.0
 --    forwardRate mkt (oMaturityInYears o)
   , oMaturityInYears = 1 -- 0.1/365
   , oDirection = Call }
@@ -445,10 +449,10 @@ p :: N a => Market a -> Greek -> a
 getPv :: N a => Market a -> (a -> a) -> a
 -- p     = digiPricer o
 -- getPv = digiOptionPv o
--- p     = blackScholesPricer o
--- getPv = optionPv o
-p     = noTouchPricer ot
-getPv = pay1Pv o
+p     = blackScholesPricer o
+getPv = optionPv o
+-- p     = noTouchPricer ot
+-- getPv = pay1Pv o
 
 greeksBump = map (\ i -> dvdx PV i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
 greeksBumpIntegrated = map (\ i -> dvdx' (const . integrated) mkt () i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
@@ -502,7 +506,7 @@ mkt = \ case
     Spot -> 1
     Vol -> 0.1
     RateDom -> 0.05
-    RateFor -> 0.02
+    RateFor -> 0.03
     PricingDate -> 0
 -- p = blackScholesPricer
 --     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
@@ -604,11 +608,13 @@ plotMesh rows = do
   writeFile dat $ unlines [unlines [unwords $ map show [y,x,v] | (x,y,v) <- r] | r <- rows]
   writeFile script $ unlines $
     ["set view 60, 60"
---     "set view 90, 90"
+     -- "set view 90, 90"
     ,"set key off"
     ,"unset colorbox"
 --     ,"set contour both"
+    ,"set hidden3d"
     ,"set pm3d depthorder border lc 'black' lw 0.33"
+--     ,concat ["splot [0:1] [0:20] [-0.1:1.1] \"", dat, "\" ",
     ,concat ["splot \"", dat, "\" ",
       -- "with lines palette lw 0.33"
       "with pm3d"
@@ -627,11 +633,11 @@ linInterpolate x (g:gs) = go g gs
 -- увеличение nx желательно сопровождать увеличением nt
 
 fem :: forall a . N a => Market a -> a
-fem = fem' 100 100
+fem = fem' 200 100
 
 fem' :: forall a . N a => Int -> Int -> Market a -> a
 fem' nx nt market =
---  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toDouble σ) (toDouble rd) (toDouble rf) nx nt (iToSpot 0) (iToSpot (nx+1)) (toDouble h) :: String) $
+  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toDouble σ) (toDouble rd) (toDouble rf) nx nt (toDouble $ iToSpot 0) (toDouble $ iToSpot (nx+1)) (toDouble (h 3)) :: String) $
   linInterpolate (log $ market Spot) $
   (\ prices -> unsafePerformIO $ do
       let toGraph = map (\(logSpot, v) -> (toDouble $ exp logSpot, toDouble v))
@@ -660,9 +666,9 @@ fem' nx nt market =
   where
     noTitle x = fmap (Graph2D.lineSpec (LineSpec.title "" LineSpec.deflt)) x
     addLogSpot iteration =
-         [(iToLogSpot 0, 0)]
-      <> zipWith (,) (map iToLogSpot [1..nx]) iteration
-      <> [(iToLogSpot (nx+1), 0)]
+--          [(iToLogSpot 0, 0)]
+      zipWith (,) (map iToLogSpot [0..nx+1]) iteration
+--       <> [(iToLogSpot (nx+1), 0)]
     iterations = take (nt+1) (iterate ump1 (u0,0))
     τ = oMaturityInYears o - market PricingDate
     σ = market Vol
@@ -673,43 +679,72 @@ fem' nx nt market =
 
     ump1 :: ([a], Int) -> ([a], Int)
     ump1 (um,mi) =
-      (solveTridiagTDMA
+      (trimSolve 0 0 -- (if mi > 30 && mi < 40 then 45 else 0)
       (m .+ k mi*θ .* a_bs) ((m .- k mi*(1-θ) .* a_bs) #> um), succ mi)
 --       (i .+ k mi*θ .* g_bs) ((i .- k mi*(1-θ) .* g_bs) #> um), succ mi)
 --     nx = 500 :: Int
 --     nt = 500 :: Int
-    (minSpot, maxSpot) = (exp (-3), otBarrier ot)
+--     (minSpot, maxSpot) = (exp (-3), otBarrier ot)
 --     (minSpot, maxSpot) = (otBarrier ot, exp 3)
 --     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
 --     maxSpot = oStrike o * 3 / 2
 --     minSpot = oStrike o     / 2
---     maxSpot = max s0 $ spotAtT market 8 τ
---     minSpot = min s0 $ spotAtT market (-1) τ
+    maxSpot = realToFrac $ toDouble $ max s0 $ spotAtT market   5 τ
+    minSpot = realToFrac $ toDouble $ min s0 $ spotAtT market (-5) τ
+    -- need 0.1*s0 for σ=0.003, rd=0.2, rf=0.01 to have diagonally
+    -- dominant matrix; σ=0.03 is fine
     s0 = market Spot
     k, iToT :: Int -> a
     k i = iToT (i+1) - iToT i
     iToT i = realToFrac ((toEnum i / toEnum nt)**β) * τ
     β = 1 -- market Vol / 2 -- ???
 --    k = τ / (toEnum nt-1) -- time step
-    h = (log maxSpot - log minSpot) / (toEnum nx+1) -- log spot step
+--     h = (log maxSpot - log minSpot) / (toEnum nx+1) -- log spot step
+--     iToLogSpot i = toEnum i * h + log minSpot
+    h i = iToLogSpot i - iToLogSpot (i-1)
+    iToLogSpot i =
+      gradeSpot (toEnum i / (toEnum nx+1)) * (log maxSpot - log minSpot)
+      + log minSpot
     iToSpot = toDouble . exp . iToLogSpot
-    iToLogSpot i = toEnum i * h + log minSpot
 
     u0 :: [a]
-    u0 = [getPv market (const $ realToFrac $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [1..nx]]
+    u0 = [getPv market (const $ realToFrac $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [0..nx+1]]
 
     s, b, m, a_bs :: Tridiag a
     -- FEM
     a_bs = (σ^2/2) .* s .+ (σ^2/2-rd+rf) .* b .+ rd .* m
-    s = (1/h) .* tridiag nx (-1) 2 (-1)
-    b = (1/2) .* tridiag nx (-1) 0   1
-    m = (h/6) .* tridiag nx   1  4   1
+--     s = (1/h) .* tridiag nx (-1) 2 (-1)
+--     b = (1/2) .* tridiag nx (-1) 0   1
+--     m = (h/6) .* tridiag nx   1  4   1
+    s = assemble $ \ h -> scale (1/h) ( 1,-1
+                                      ,-1, 1)
+    b = assemble $ \ h -> scale (1/2) (-1, 1
+                                      ,-1, 1)
+    m = assemble $ \ h -> scale (h/6) ( 2, 1
+                                      , 1, 2)
+    bcm = tridiagFromLists (nx+2)
+      (repeat 0) ([-1] <> replicate (nx+1) 0) (repeat 0)
+    bc = replicate (nx+1) 0 <> [1]
+    assemble elt = -- trimTridiag 1 1 $
+      tridiagFrom2x2Elements
+      [elt (h i) | i <- [1..nx+1]]
+    scale x (a,b,c,d) = (x*a,x*b,x*c,x*d)
+    trimSolve t b m v =
+         replicate t 0
+      <> solveTridiagTDMA (trimTridiag t b m) (take (nx+2-t-b) $ drop t v)
+      <> replicate b 0
 
     -- FDM
-    g_bs = (σ^2/2) .* r .+ (σ^2/2-rd+rf) .* c .+ rd .* i
-    r = (1/h) .* s
-    c = (1/h) .* b
-    i = tridiag nx 0 1 0
+--     g_bs = (σ^2/2) .* r .+ (σ^2/2-rd+rf) .* c .+ rd .* i
+--     r = (1/h) .* s
+--     c = (1/h) .* b
+--     i = tridiag nx 0 1 0
+
+gradeSpot x
+  = x
+--   = x**0.5
+--   | x < 0.5   =     2*x^2
+--   | otherwise = 1 - 2*(1-x)^2
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
 main = defaultMain
@@ -743,7 +778,7 @@ main = defaultMain
     benchGeneric size =
       bench (show size) $ whnf (uncurry (LA.<\>)) (m,i)
      where
-      !m = laTridiag size 3 10 4 :: LA.Matrix Double
+      !m = laTridiag (tridiag size 3 10 4) :: LA.Matrix Double
       !i = LA.ident size
     size = 250
     --         default                  +openblas
