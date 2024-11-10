@@ -11,7 +11,8 @@ executable Test
   main-is:             Main.hs
   other-modules:
         Random,
-        Tridiag
+        Tridiag,
+        Market
   -- other-extensions:
   build-depends:       QuickCheck >= 2.14.2,
                        ad,
@@ -41,3 +42,4 @@ executable Test
                        unordered-containers >= 0.2.13.0,
                        vector
   default-language:    GHC2021
+  default-extensions:  LambdaCase, RecordWildCards, BangPatterns, ViewPatterns

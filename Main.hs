@@ -1,11 +1,13 @@
-{-# LANGUAGE LambdaCase, BangPatterns, ViewPatterns, MagicHash, RecordWildCards, ScopedTypeVariables #-}
-{-# OPTIONS_GHC -Wno-x-partial #-}
+{-# LANGUAGE MagicHash, ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-x-partial -Wno-gadt-mono-local-binds #-}
 
 module Main (module Main) where
 
+import Data.Char
 import Control.DeepSeq
 import Data.Number.Erf
 
+import qualified Data.Map.Strict as Map
 import Data.Array
 import Debug.Trace
 import Data.Monoid
@@ -58,6 +60,7 @@ import System.Process
 
 import Random
 import Tridiag
+import Market
 import Control.Concurrent.Chan
 import Control.Concurrent.Async
 
@@ -71,14 +74,6 @@ data Greek
   | Vanna
   | Theta
   deriving Show
-
-data Input
-  = Spot
-  | Vol
-  | RateDom
-  | RateFor
-  | PricingDate
-  deriving (Show, Eq)
 
 data OptionDirection
   = Call
@@ -121,9 +116,10 @@ newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
 forwardRate :: Erf a => Market a -> MaturityInYears a -> a
 forwardRate market (MaturityInYears τ) = x * exp ((rd-rf)*τ)
   where
-    x = market Spot
-    rd = market RateDom
-    rf = market RateFor
+    x = m Spot
+    rd = m RateDom
+    rf = m RateFor
+    m i = get i market
 
 digiPricer :: Erf a => Option a -> Market a -> Greek -> a
 digiPricer o market what = case what of
@@ -131,15 +127,16 @@ digiPricer o market what = case what of
     φ * exp (-rd*τ) * nc (φ*dm) -- digi
   where
     k = oStrike o
-    τ = oMaturityInYears o - market PricingDate
+    τ = oMaturityInYears o - m PricingDate
     φ = oφ o
-    x = market Spot
-    σ = market Vol
-    rd = market RateDom
-    rf = market RateFor
+    x = m Spot
+    σ = get GetATMVol market τ
+    rd = m RateDom
+    rf = m RateFor
     nc = normcdf
     f = x * exp ((rd-rf)*τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
+    m i = get i market
 
 blackScholesPricer :: Erf a => Option a -> Market a -> Greek -> a
 blackScholesPricer o market what = case what of
@@ -162,23 +159,25 @@ blackScholesPricer o market what = case what of
     + φ * (rf*x*exp (-rf*τ) * nc (φ*dp) - rd*k*exp (-rd*τ) * nc (φ*dm))
   where
     k = oStrike o
-    τ = oMaturityInYears o - market PricingDate
-    x = market Spot
-    σ = market Vol
-    rd = market RateDom
-    rf = market RateFor
+    τ = oMaturityInYears o - m PricingDate
+    x = m Spot
+    σ = m GetATMVol τ
+    rd = m RateDom
+    rf = m RateFor
     φ = oφ o
     nc = normcdf
     n = normdf
     f = x * exp ((rd-rf)*τ)
     dp = (log (f/k) + σ^2/2*τ) / (σ*sqrt τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
+    m i = get i market
 
 pay1Pricer :: Erf a => OneTouch a -> Market a -> Greek -> a
 pay1Pricer ot market PV = exp (-rd*τ)
   where
-    τ = otMaturityInYears ot - market PricingDate
-    rd = market RateDom
+    τ = otMaturityInYears ot - m PricingDate
+    rd = m RateDom
+    m i = get i market
 
 noTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
 noTouchPricer ot market what =
@@ -191,13 +190,13 @@ oneTouchPricer ot market PV =
    + (b/x)**((θm-𝜗m)/σ) * nc ( η*em))
   where
     b = otBarrier ot
-    τ = otMaturityInYears ot - market PricingDate
+    τ = otMaturityInYears ot - m PricingDate
     η = otη ot
     ω = otω ot
-    x = market Spot
-    σ = market Vol
-    rd = market RateDom
-    rf = market RateFor
+    x = m Spot
+    σ = m GetATMVol τ
+    rd = m RateDom
+    rf = m RateFor
     θp = (rd-rf)/σ + σ/2
     θm = (rd-rf)/σ - σ/2
     𝜗m = sqrt (θm^2 + 2*(1-ω)*rd)
@@ -205,6 +204,7 @@ oneTouchPricer ot market PV =
     em = (-log (x/b) - σ*𝜗m*τ) / (σ*sqrt τ)
     nc = normcdf
     n = normdf
+    m i = get i market
 
 oφ o = case oDirection o of
   Call ->  1
@@ -226,38 +226,42 @@ forwardPricer f market what = case what of
     x * exp ((-rf)*τ) - k * exp ((-rd)*τ)
   where
     Strike k = fStrike f
-    MaturityInYears m = fMaturityInYears f
-    τ = m - market PricingDate
-    x = market Spot
-    rd = market RateDom
-    rf = market RateFor
+    MaturityInYears mat = fMaturityInYears f
+    τ = mat - m PricingDate
+    x = m Spot
+    rd = m RateDom
+    rf = m RateFor
+    m i = get i market
 
 -- | ϵ -- a sample from a normal distribution with mean=0 and stddev=1
 spotAtT market ϵ τ =
   s0 * exp ((μ̂ - σ^2/2)*τ + σ*ϵ*sqrt τ)
   where
     μ̂ = rd - rf
-    s0 = market Spot
-    σ = market Vol
-    rd = market RateDom
-    rf = market RateFor
+    s0 = m Spot
+    σ = m GetATMVol τ
+    rd = m RateDom
+    rf = m RateFor
+    m i = get i market
 
 spotPath market dτ es =
   map ((s0 *) . exp) $
   scanl' (+) 0 [(μ̂ - σ^2/2)*dτ + σ*ϵ*sqrt dτ | ϵ <- es]
   where
     μ̂ = rd - rf
-    s0 = market Spot
-    σ = market Vol
-    rd = market RateDom
-    rf = market RateFor
+    s0 = m Spot
+    σ = m GetATMVol (dτ * toEnum (length es))
+    rd = m RateDom
+    rf = m RateFor
+    m i = get i market
 
 pay1Pv :: N a => Option a -> Market a -> (a -> a) -> a
 pay1Pv o market _ =
   exp (-rd*τ)
   where
-    rd = market RateDom
-    τ = oMaturityInYears o - market PricingDate
+    rd = m RateDom
+    τ = oMaturityInYears o - m PricingDate
+    m i = get i market
 
 optionPv :: N a => Option a -> Market a -> (a -> a) -> a
 optionPv o market spotAt =
@@ -268,24 +272,29 @@ optionPv o market spotAt =
     scale = 1e10 -- better with 100, but doesn't break with 1e10
     payoff = φ * (spotAt τ - k)
     k = oStrike o
-    τ = oMaturityInYears o - market PricingDate
+    τ = oMaturityInYears o - m PricingDate
     φ = oφ o
-    rd = market RateDom
+    rd = m RateDom
+    m i = get i market
 
 digiOptionPv o market spotAt =
   exp (-rd*τ) * step (φ * (spotAt τ - k))
   where
     k = oStrike o
-    τ = oMaturityInYears o - market PricingDate
+    τ = oMaturityInYears o - m PricingDate
     φ = oφ o
-    rd = market RateDom
+    rd = m RateDom
+    m i = get i market
 
 combine a b market what = a market what + b market what
 scale s f market what = s * f market what
 
 
-toDouble :: N a => a -> Double
-toDouble = realToFrac
+toD :: N a => a -> Double
+toD = realToFrac
+
+toN :: N a => Double -> a
+toN = realToFrac
 
 instance NFData (R.Reverse s a) where
   rnf a = seq a ()
@@ -331,8 +340,6 @@ treeSum l = case splitSum l of -- $ sort l of
     splitSum [x] = [x]
     splitSum (x:y:xs) = x+y : splitSum xs
 
-type Market a = Input -> a
-
 parMapSum :: (Num b, NFData a, NFData b) => Int -> (a -> b) -> [a] -> b
 parMapSum nThreads f xs = unsafePerformIO $ do
   c <- newChan
@@ -355,12 +362,12 @@ parMapSum nThreads f xs = unsafePerformIO $ do
 -- parMap лучше чем forConcurrently, но возможно из-за неравномерной загрузки
 
 monteCarlo :: N a => Market a -> a
-monteCarlo mkt =
+monteCarlo market =
 --   unsafePerformIO $
 --   fmap sum $ forConcurrently (splitMixSplits threads) $ seqpure .
   -- Jacobian похоже тоже надо внутри нитки делать
   -- зависает в каких-то блокировках
-    (/ toEnum n) . parMapSum 8 (pv . spotPath mkt dt . map realToFrac)
+    (/ toEnum n) . parMapSum 8 (pv . spotPath market dt . map realToFrac)
     $ chunkedGaussian nt (n `div` threads)
   where
     seqpure a = a `seq` pure a
@@ -369,9 +376,10 @@ monteCarlo mkt =
     threads = 1
     nt = 500
     n = 50000
-    τ = oMaturityInYears o - mkt PricingDate
+    τ = oMaturityInYears o - m PricingDate
     dt = τ / toEnum nt
-    s0 = mkt Spot
+    s0 = m Spot
+    m i = get i market
 
 _monteCarlo :: N a => Market a -> a
 _monteCarlo mkt =
@@ -433,7 +441,7 @@ o = Option
   { oStrike =
     1.0
 --    forwardRate mkt (oMaturityInYears o)
-  , oMaturityInYears = 1 -- 0.1/365
+  , oMaturityInYears = 1.2 -- 0.1/365
   , oDirection = Call }
 ot :: Erf a => OneTouch a
 ot = OneTouch
@@ -454,10 +462,25 @@ getPv = optionPv o
 -- p     = noTouchPricer ot
 -- getPv = pay1Pv o
 
-greeksBump = map (\ i -> dvdx PV i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
-greeksBumpIntegrated = map (\ i -> dvdx' (const . integrated) mkt () i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
-greeksBumpMonteCarlo = map (\ i -> dvdx' (const . monteCarlo) mkt () i 0.00001) [Spot, Vol, RateDom, RateFor, PricingDate]
-greeksAnalytic = map (p mkt) [Delta, Vega, RhoDom, RhoFor, Theta, Gamma, Vanna] :: [Double]
+mapInputs f = -- zip is $
+  map f is
+  where
+    is = map fst $ inputs mkt
+greeksBump = mapInputs (\ i -> dvdx PV i 0.00001)
+greeksBumpIntegrated = mapInputs (\ i -> dvdx' (const . integrated) mkt () i 0.00001)
+greeksBumpMonteCarlo = mapInputs (\ i -> dvdx' (const . monteCarlo) mkt () i 0.00001)
+greeksAnalytic = map (p mkt) [Delta, Vega, RhoDom, RhoFor, Theta-- , Gamma, Vanna
+                             ] :: [Double]
+compareToAnalytic !g =
+  map (\(g,is) -> p mkt g `pct` sum (mapMaybe (flip lookup gs) is)) mapping
+  where
+    gs = zip (map fst $ inputs (mkt :: Market Double)) g
+    mapping =
+      [(Delta, [Spot])
+      ,(Vega, [i | (i@Vol {},_) <- gs])
+      ,(RhoDom, [RateDom])
+      ,(RhoFor, [RateFor])
+      ,(Theta, [PricingDate])]
 greeksAD = snd $ jacobianPvGreeks (flip p PV)
 greeksADMonteCarlo = snd $ jacobianPvGreeks monteCarlo
 
@@ -487,27 +510,109 @@ pv :: Double
 
 jacobianPvGreeks :: (forall a . N a => Market a -> a) -> (Double, [Double])
 jacobianPvGreeks pricer =
-  head $ R.jacobian' (\ [s,v,rd,rf,pd] ->
-    [ pricer
-      (\ case
-        Spot -> s
-        Vol -> v
-        RateDom -> rd
-        RateFor -> rf
-        PricingDate -> pd)
-    ])
-    [mkt Spot, mkt Vol, mkt RateDom, mkt RateFor, mkt PricingDate]
+  head $ R.jacobian' (\ xs ->
+    [pricer $ modifyList (zip (map (coerceGet . fst) is) (map const xs)) mkt])
+    (map snd is)
+  where
+    is = inputs mkt
 
 --     `combine`
 --     scale (-0.5)
 --     (forwardPricer Forward { fStrike = 1.2, fMaturityInYears = 3/12 })
-mkt :: Fractional a => Input -> a
-mkt = \ case
-    Spot -> 1
-    Vol -> 0.1
-    RateDom -> 0.05
-    RateFor -> 0.03
-    PricingDate -> 0
+mkt :: N a => Market a
+mkt = buildMarket $ do
+  input Spot 1
+  input RateDom 0.05
+  input RateFor 0.03
+  input PricingDate 0
+  let flatRow tenor x = do
+        i <- input (Vol tenor ATMVol) x
+        pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
+--   v1 <- flatRow  "11M" 0.1
+--   v2 <- flatRow "13M" 0.2
+--   node GetATMVol $ atmVol <$> sequenceA [v1, v2]
+  let rowNode v = flatRow (vtrTenor v) (vtrATM v)
+  s <- mapM rowNode testSurface
+  node GetATMVol $ atmVol <$> sequenceA s
+
+
+data VolTableRow a
+  = VolTableRow
+    { vtrTenor :: String
+    , vtrATM :: a
+    , vtrRR25 :: a
+    , vtrBF25 :: a
+    , vtrRR10 :: a
+    , vtrBF10 :: a
+    }
+
+instance N a => Show (VolTableRow a) where
+  show (VolTableRow {..}) =
+    printf "%3s %7.3f %7.3f %7.3f %7.3f %7.3f"
+      vtrTenor (toD vtrATM) (toD vtrRR25) (toD vtrBF25)
+      (toD vtrRR10) (toD vtrBF10)
+
+atmVol :: N a => [VolTableRow a] -> a -> a
+atmVol surface = \ t -> case Map.splitLookup t atms of
+  (_, Just atm, _) -> atm
+    -- FIXME: interpolate both upper and lower sections with two
+    --        crossing step functions to make on-pillar AD Theta
+    --        closer to the bump Theta?
+  (l, _, r) -> case (Map.lookupMax l, Map.lookupMin r) of
+    (Just (t1, v1), Just (t2, v2)) ->
+      -- Iain Clark, p65, Flat forward interpolation
+      let v12 = (v2^2*t2 - v1^2*t1) / (t2 - t1) in
+      if v12 < 0 then
+        error $ printf "atmVol: negative forward variance v12 = %.8f, t1=%f, v1=%f, t2=%f, v2=%f"
+          (toD v12) (toD t1) (toD v1) (toD t2) (toD v2)
+      else
+        sqrt $ (v1^2*t1 + v12 * (t - t1)) / t
+    (Just (_,  v1), _            ) -> v1
+    (_            , Just (t2, v2)) -> v2
+    _ -> error "atmVol: empty vol surface"
+  where
+    atms = Map.fromList
+      [(toN (tenorToYear vtrTenor), vtrATM) | VolTableRow{..} <- surface]
+
+testSurface :: N a => [VolTableRow a]
+testSurface =
+  -- Copied from Iain Clark, p64, EURUSD
+  --             ATM
+  --  Exp     Bid     Ask    25D RR   25D BF   10D RR   10D BF
+  [r  "1D"   7.556   8.778  (-0.636)   0.084  (-1.251)  0.299
+  ,r  "1W"  11.550  12.350  (-1.432)   0.270  (-2.540)  0.840
+  ,r  "2W"  11.650  12.300  (-1.510)   0.257  (-2.750)  0.808
+  ,r  "3W"  11.490  12.030  (-1.558)   0.265  (-2.857)  0.823
+  ,r  "1M"  11.540  12.040  (-1.660)   0.260  (-3.042)  0.795
+  ,r  "2M"  11.605  12.006  (-1.667)   0.315  (-3.075)  0.990
+  ,r  "3M"  11.795  12.195  (-1.677)   0.365  (-3.103)  1.165
+  ,r  "6M"  12.340  12.690  (-1.680)   0.445  (-3.132)  1.460
+  ,r  "1Y"  12.590  12.915  (-1.683)   0.520  (-3.158)  1.743
+--   ,r  "18M"  12.590  12.915  (-1.683)   0.520  (-3.158)  1.743
+  ,r "18M"  12.420  12.750  (-1.577)   0.525  (-3.000)  1.735
+  ,r  "2Y"  12.315  12.665  (-1.520)   0.495  (-2.872)  1.665
+  ,r  "3Y"  11.915  12.310  (-1.407)   0.457  (-2.683)  1.572
+  ,r  "5Y"  11.075  11.520  (-1.183)   0.417  (-2.217)  1.363
+  ,r  "7Y"  11.144  10.626  (-1.205)   0.353  (-2.382)  1.157
+  ]
+  where
+    r tenor bid ask rr25 bf25 rr10 bf10 =
+      VolTableRow tenor (p (bid+ask) / 2) (p rr25) (p bf25) (p rr10) (p bf10)
+    p x = x / 100
+
+-- | dumb tenor to 365 days year conversion, no calendar/spot rules
+tenorToYear t = case reads t of
+  [(x, [unit])] -> x * y (toUpper unit)
+  _ -> error $ "Bad tenor " <> show t
+  where
+    d = 1/365
+    y = \ case
+      'D' -> d
+      'W' -> 7*d
+      'M' -> 1/12
+      'Y' -> 1
+      u -> error $ "Unknown unit " <> show u
+
 -- p = blackScholesPricer
 --     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
 -- mkt = \ case
@@ -516,14 +621,12 @@ mkt = \ case
 --     RateDom -> 0.03
 --     RateFor -> 0.01
 --     PricingDate -> 0
-modify input f m i
-  | i == input = f $ m i
-  | otherwise = m i
-m input f = modify input f mkt
 
 test' what rd = p (modify RateDom (const rd) mkt) what
 
-solvePriceToVol price = solve (\ x -> p (m Vol (const x)) PV - price)
+m inp f = modify inp f mkt
+
+--solvePriceToVol price = solve (\ x -> p (modify GetATMVol (const $ const x) mkt) PV - price)
 
 -- | Bisection solver
 solve f = go 0 (-10) 10
@@ -545,7 +648,7 @@ symd f x part bump = (f (x+part*bump) - f (x-part*bump)) / (2*bump)
 
 dvdx'
   :: (Market Double -> a -> Double)
-     -> Market Double -> a -> Input -> Double -> Double
+     -> Market Double -> a -> Get Double Double -> Double -> Double
 dvdx' p mkt what x (bump :: Double)
 --     | mkt x > bump =
 --         (p (modify x (* (1+bump)) mkt) what -
@@ -571,6 +674,10 @@ dvdd what x1 x2 bump = dvdx' (\ m w -> dvdx' p m w x2 bump) mkt what x1 bump
 mcError, integratedError :: N a => a
 mcError = (1 - monteCarlo mkt / p mkt PV) * 100
 integratedError = (1 - integrated mkt / p mkt PV) * 100
+
+plotf :: Double -> Double -> (Double -> Double) -> IO ()
+plotf a b f = void $ GP.plotDefault $
+  Plot2D.function Graph2D.lines (linearScale 1000 (a, b)) f
 
 plot = void $ GP.plotDefault $
   Plot2D.function Graph2D.lines
@@ -637,10 +744,10 @@ fem = fem' 200 100
 
 fem' :: forall a . N a => Int -> Int -> Market a -> a
 fem' nx nt market =
-  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toDouble σ) (toDouble rd) (toDouble rf) nx nt (toDouble $ iToSpot 0) (toDouble $ iToSpot (nx+1)) (toDouble (h 3)) :: String) $
-  linInterpolate (log $ market Spot) $
+  trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toD σ) (toD rd) (toD rf) nx nt (toD $ iToSpot 0) (toD $ iToSpot (nx+1)) (toD (h 3)) :: String) $
+  linInterpolate (log $ get Spot market) $
   (\ prices -> unsafePerformIO $ do
-      let toGraph = map (\(logSpot, v) -> (toDouble $ exp logSpot, toDouble v))
+      let toGraph = map (\(logSpot, v) -> (toD $ exp logSpot, toD v))
       -- plotListStyle [] defaultStyle $ toGraph prices
 --       GP.plotDefault
 --         $ Frame.cons
@@ -653,7 +760,7 @@ fem' nx nt market =
 --         $ -- Graph3D.lineSpec (LineSpec.title "" LineSpec.deflt) <$>
 --           Plot3D.mesh
       plotMesh
-          [map (\(x,v) -> (x, toDouble $ iToT t, v)) $ toGraph $ addLogSpot l
+          [map (\(x,v) -> (x, toD $ iToT t, v)) $ toGraph $ addLogSpot l
           |(l,t) <- iterations]
 --         foldMap
 --         (noTitle .
@@ -670,10 +777,10 @@ fem' nx nt market =
       zipWith (,) (map iToLogSpot [0..nx+1]) iteration
 --       <> [(iToLogSpot (nx+1), 0)]
     iterations = take (nt+1) (iterate ump1 (u0,0))
-    τ = oMaturityInYears o - market PricingDate
-    σ = market Vol
-    rd = market RateDom
-    rf = market RateFor
+    τ = oMaturityInYears o - get PricingDate market
+    σ = get GetATMVol market τ
+    rd = get RateDom market
+    rf = get RateFor market
 --    r = rd-rf -- так получается d rf = - d rd
     θ = 1 -- 1=implicit, 0=explicit -- oscilates, even with 0.5
 
@@ -689,11 +796,11 @@ fem' nx nt market =
 --     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
 --     maxSpot = oStrike o * 3 / 2
 --     minSpot = oStrike o     / 2
-    maxSpot = realToFrac $ toDouble $ max s0 $ spotAtT market   5 τ
-    minSpot = realToFrac $ toDouble $ min s0 $ spotAtT market (-5) τ
+    maxSpot = realToFrac $ toD $ max s0 $ spotAtT market   5 τ
+    minSpot = realToFrac $ toD $ min s0 $ spotAtT market (-5) τ
     -- need 0.1*s0 for σ=0.003, rd=0.2, rf=0.01 to have diagonally
     -- dominant matrix; σ=0.03 is fine
-    s0 = market Spot
+    s0 = get Spot market
     k, iToT :: Int -> a
     k i = iToT (i+1) - iToT i
     iToT i = realToFrac ((toEnum i / toEnum nt)**β) * τ
@@ -705,7 +812,7 @@ fem' nx nt market =
     iToLogSpot i =
       gradeSpot (toEnum i / (toEnum nx+1)) * (log maxSpot - log minSpot)
       + log minSpot
-    iToSpot = toDouble . exp . iToLogSpot
+    iToSpot = toD . exp . iToLogSpot
 
     u0 :: [a]
     u0 = [getPv market (const $ realToFrac $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [0..nx+1]]
