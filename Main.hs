@@ -63,6 +63,7 @@ import Tridiag
 import Market
 import Control.Concurrent.Chan
 import Control.Concurrent.Async
+import Numeric.GSL.Fitting
 
 data Greek
   = PV
@@ -312,6 +313,10 @@ class (NFData a, Show a, Enum a, Ord a, Real a, Erf a) => N a where
 -- step x = (x + abs x) / (2*x)
 -- step x = R.diff (max 0) x -- derivative of the ramp function
 
+  -- | Specify an explicit derivative to a variable
+  explicitD :: Double -> a -> a
+  explicitD _ _ = 0
+
 width = 0.0001 -- NaN with 0.01, larger error with 0.1 or 1
                 -- but for 'integrated' 0.1 gives good result
 --     width = 0.000001  -- gives 0.00004 = 1 (half pip)
@@ -329,6 +334,7 @@ instance (Reifies s R.Tape, Ord a, Erf a, N a) => N (R.Reverse s a) where
     (\ x -> k / (exp (k*x) + exp (-k*x) + 2))
   -- no NaN this way, but error grows for width<0.1, and breaks at 0.0003
 -- 1000 / (exp 1000 + exp (-1000) + 2)
+  explicitD d = J.lift1 (const 0) (const $ realToFrac d)
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -463,7 +469,7 @@ getPv = optionPv o
 -- getPv = pay1Pv o
 
 mapInputs f = -- zip is $
-  map f is
+  map f is :: [Double]
   where
     is = map fst $ inputs mkt
 greeksBump = mapInputs (\ i -> dvdx PV i 0.00001)
@@ -628,6 +634,79 @@ m inp f = modify inp f mkt
 
 --solvePriceToVol price = solve (\ x -> p (modify GetATMVol (const $ const x) mkt) PV - price)
 
+fitTest :: [[Double]]
+fitTest = R.jacobian (\ is -> fitSystem 2 is $ \ [a,b,c] [x,y] ->
+  [  x^2 + b*y**2.5 - 9
+  ,a*x^2 -   y      - c]) [1,2,3]
+
+-- | Solve a system of non-linear equations for a set of inputs.
+--
+-- Uses Levenberg-Marquardt fitting from GSL with jacobians computed
+-- using AD.
+--
+-- Results have derivatives to inputs computed via the implicit
+-- function theorem.
+--
+-- Can be used to plug a model parameters calibration
+-- (m parameters -> m equations = 0) into an AD framework.
+fitSystem
+  :: N a
+  => Int -- ^ m = number of equations
+  -> [a] -- ^ n inputs
+  -> (forall a . N a => [a] -> [a] -> [a]) -- ^ n inputs -> m guesses -> m results
+  -> [a] -- ^ results with derivatives to inputs
+fitSystem m inputs system =
+  zipWith
+    (\ r dis ->
+      realToFrac r + sum (zipWith explicitD (LA.toList dis) inputs))
+    results (LA.toRows jResultsInputs)
+  where
+    -- Jacobian of results to inputs via the implicit function theorem
+    -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
+    jResultsInputs = (- (LA.inv $ jr results)) <> ji inputsD
+    jr = matrix m m . R.jacobian (\ r -> system (map realToFrac inputs) r)
+    ji = matrix m n . R.jacobian (\ i -> system i (map toN results))
+    matrix m n = (LA.><) m n . concat -- == LA.fromLists
+    (LA.toList -> results, _path) =
+      nlFitting LevenbergMarquardtScaled
+      1e-10 1e-10 20
+      (\ (LA.toList -> x) -> LA.fromList $ system inputsD x)
+      (\ (LA.toList -> x) -> jr x)
+      (LA.fromList $ replicate m 0.5) -- initial guess
+    inputsD = map toD inputs
+    n = length inputs
+
+test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
+       , dgda `pct` fdgda, dgdb `pct` fdgdb)
+  where
+    [[fdgda, fdgdb]] = R.jacobian (\ as -> fitSystem 1 as f) [ia,ib]
+    dgda = - (1/dx) * dfda
+    dgdb = - (1/dx) * dfdb
+    dgdaBump = bumpDiff (\ a -> nx a ib) ia 0.00001
+    dgdbBump = bumpDiff (\ b -> nx ia b) ib 0.00001
+    Right (x, [dfda, dfdb], dx) = n ia ib
+    ia = 1
+    ib = 2
+    n a b = newton (\ as x -> head $ f as [x]) [a, b] 0.5
+    nx a b = let Right (x,_,_) = n a b in x
+    f [a,b] [x] = [a * cos x - b * x^3]
+
+newton
+  :: N a
+  => (forall a . N a => [a] -> a -> a) -- inputs guess -> result
+  -> [a] -- ^ inputs
+  -> a   -- ^ guess
+  -> Either String (a, [a], a) -- ^ (result, [df_i\/dInput_i], dGuess)
+newton f inputs x0 = go 0 x0
+  where
+    go iter x
+      | iter > 50 = Left "too many iterations"
+      | (fx, (dx:dis)) <- R.grad' (\ (x:is) -> f is x) (x:inputs) =
+        if abs fx < 1e-15 then
+          Right (x, dis, dx)
+        else
+          go (succ iter) (x - fx / dx)
+
 -- | Bisection solver
 solve f = go 0 (-10) 10
   where
@@ -646,10 +725,11 @@ solve f = go 0 (-10) 10
 -- symd f x bump = (f (x+bump) - f (x-bump)) / (2*bump)
 symd f x part bump = (f (x+part*bump) - f (x-part*bump)) / (2*bump)
 
+bumpDiff f x bump = (f (x+bump) - f (x-bump)) / (2*bump)
 dvdx'
-  :: (Market Double -> a -> Double)
-     -> Market Double -> a -> Get Double Double -> Double -> Double
-dvdx' p mkt what x (bump :: Double)
+  :: N n => (Market n -> a -> n)
+     -> Market n -> a -> Get n n -> n -> n
+dvdx' p mkt what x (bump :: n)
 --     | mkt x > bump =
 --         (p (modify x (* (1+bump)) mkt) what -
 --          p (modify x (* (1-bump)) mkt) what) / (2*bump*mkt x)

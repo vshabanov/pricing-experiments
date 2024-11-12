@@ -45,7 +45,7 @@ data Get n a where
   -- inputs (usually), not a separate type to make 'get' work uniformly
   -- with inputs and nodes
   Spot :: Get a a
-  Vol :: String -> VolInput -> Get a a
+  Vol :: Tenor -> VolInput -> Get a a
   RateDom :: Get a a
   RateFor :: Get a a
   PricingDate :: Get a a
@@ -56,6 +56,9 @@ data Get n a where
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)
 deriving instance Show (Get n a)
+
+type Tenor = String
+-- TODO: add a better sorting with a custom type
 
 data VolInput
   = ATMVol
@@ -145,7 +148,7 @@ modify i f = modifyList [(i, f)]
 modifyList :: [(Get a a, (a -> a))] -> Market a -> Market a
 modifyList l m = m {
   -- FIXME: we can modify nodes as well
-  -- FIXME: test that node exists
+  -- FIXME: test that the node exists
   mInputs = Map.differenceWith
     (\ x f -> Just $ f x) (mInputs m) (Map.fromList l)
   }
