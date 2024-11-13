@@ -12,7 +12,8 @@ executable Test
   other-modules:
         Random,
         Tridiag,
-        Market
+        Market,
+        Tenor
   -- other-extensions:
   build-depends:       QuickCheck >= 2.14.2,
                        ad,

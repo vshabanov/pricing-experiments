@@ -61,6 +61,7 @@ import System.Process
 import Random
 import Tridiag
 import Market
+import Tenor
 import Control.Concurrent.Chan
 import Control.Concurrent.Async
 import Numeric.GSL.Fitting
@@ -115,12 +116,8 @@ newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
   deriving (Num, Fractional, Floating, Erf)
 
 forwardRate :: Erf a => Market a -> MaturityInYears a -> a
-forwardRate market (MaturityInYears τ) = x * exp ((rd-rf)*τ)
-  where
-    x = m Spot
-    rd = m RateDom
-    rf = m RateFor
-    m i = get i market
+forwardRate market (MaturityInYears τ) = get ForwardRate market τ
+
 
 digiPricer :: Erf a => Option a -> Market a -> Greek -> a
 digiPricer o market what = case what of
@@ -131,7 +128,7 @@ digiPricer o market what = case what of
     τ = oMaturityInYears o - m PricingDate
     φ = oφ o
     x = m Spot
-    σ = get GetATMVol market τ
+    σ = get GetATMVol market τ k
     rd = m RateDom
     rf = m RateFor
     nc = normcdf
@@ -148,7 +145,7 @@ blackScholesPricer o market what = case what of
   RhoFor ->
     -φ * x * τ * exp (-rf*τ) * nc (φ*dp)
   Delta ->
-    φ * exp (-rf*τ) * nc (φ*dp)
+    φ * exp (-rf*τ) * nc (φ*dp) -- pips spot delta
   Gamma ->
     exp (-rf*τ) * n dp / (x*σ*sqrt τ)
   Vega ->
@@ -162,7 +159,7 @@ blackScholesPricer o market what = case what of
     k = oStrike o
     τ = oMaturityInYears o - m PricingDate
     x = m Spot
-    σ = m GetATMVol τ
+    σ = m GetATMVol τ k
     rd = m RateDom
     rf = m RateFor
     φ = oφ o
@@ -172,6 +169,10 @@ blackScholesPricer o market what = case what of
     dp = (log (f/k) + σ^2/2*τ) / (σ*sqrt τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
     m i = get i market
+
+pipsForwardDelta (dirφ -> φ) f k σ τ = φ * normcdf (φ*dp)
+  where
+    dp = (log (f/k) + σ^2/2*τ) / (σ*sqrt τ)
 
 pay1Pricer :: Erf a => OneTouch a -> Market a -> Greek -> a
 pay1Pricer ot market PV = exp (-rd*τ)
@@ -195,7 +196,7 @@ oneTouchPricer ot market PV =
     η = otη ot
     ω = otω ot
     x = m Spot
-    σ = m GetATMVol τ
+    σ = m GetATMVol τ b
     rd = m RateDom
     rf = m RateFor
     θp = (rd-rf)/σ + σ/2
@@ -207,7 +208,9 @@ oneTouchPricer ot market PV =
     n = normdf
     m i = get i market
 
-oφ o = case oDirection o of
+oφ o = dirφ $ oDirection o
+
+dirφ d = case d of
   Call ->  1
   Put  -> -1
 
@@ -240,7 +243,7 @@ spotAtT market ϵ τ =
   where
     μ̂ = rd - rf
     s0 = m Spot
-    σ = m GetATMVol τ
+    σ = m GetATMVol τ 1
     rd = m RateDom
     rf = m RateFor
     m i = get i market
@@ -251,7 +254,7 @@ spotPath market dτ es =
   where
     μ̂ = rd - rf
     s0 = m Spot
-    σ = m GetATMVol (dτ * toEnum (length es))
+    σ = m GetATMVol (dτ * toEnum (length es)) 1
     rd = m RateDom
     rf = m RateFor
     m i = get i market
@@ -527,24 +530,45 @@ jacobianPvGreeks pricer =
 --     (forwardPricer Forward { fStrike = 1.2, fMaturityInYears = 3/12 })
 mkt :: N a => Market a
 mkt = buildMarket $ do
-  input Spot 1
-  input RateDom 0.05
-  input RateFor 0.03
-  input PricingDate 0
-  let flatRow tenor x = do
-        i <- input (Vol tenor ATMVol) x
-        pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
+  s <- input Spot 1
+  rd <- input RateDom 0.05
+  rf <- input RateFor 0.03
+  pd <- input PricingDate 0
+
+  forwardRate <- node ForwardRate $ (\ s rd rf pd t -> s * exp ((rd-rf)*(t-pd)))
+    <$> s <*> rd <*> rf <*> pd
+
+--   let flatRow tenor x = do
+--         i <- input (Vol tenor ATMVol) x
+--         pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
 --   v1 <- flatRow  "11M" 0.1
 --   v2 <- flatRow "13M" 0.2
 --   node GetATMVol $ atmVol <$> sequenceA [v1, v2]
-  let rowNode v = flatRow (vtrTenor v) (vtrATM v)
+  let flatRow tenor x = do
+        i <- input (Vol tenor ATMVol) x
+        pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
+  let rowNode VolTableRow{vtrTenor=t,..} = do
+        inputs <- sequence
+          [input (Vol t ATMVol) vtrATM
+          ,input (Vol t RR25)   vtrRR25
+          ,input (Vol t BF25)   vtrBF25
+          ,input (Vol t RR10)   vtrRR10
+          ,input (Vol t BF10)   vtrBF10]
+        pure $ (\ [atm, rr25, bf25, rr10, bf10] ->
+          VolTableRow
+          { vtrTenor = t
+          , vtrATM  = atm
+          , vtrRR25 = rr25
+          , vtrBF25 = bf25
+          , vtrRR10 = rr10
+          , vtrBF10 = bf10
+          }) <$> sequenceA inputs
   s <- mapM rowNode testSurface
-  node GetATMVol $ atmVol <$> sequenceA s
+  node GetATMVol $ atmVol <$> sequenceA s <*> forwardRate
 
-
-data VolTableRow a
+data VolTableRow t a
   = VolTableRow
-    { vtrTenor :: String
+    { vtrTenor :: t
     , vtrATM :: a
     , vtrRR25 :: a
     , vtrBF25 :: a
@@ -552,35 +576,77 @@ data VolTableRow a
     , vtrBF10 :: a
     }
 
-instance N a => Show (VolTableRow a) where
+instance (Show t, N a) => Show (VolTableRow t a) where
   show (VolTableRow {..}) =
     printf "%3s %7.3f %7.3f %7.3f %7.3f %7.3f"
-      vtrTenor (toD vtrATM) (toD vtrRR25) (toD vtrBF25)
+      (show vtrTenor) (toD vtrATM) (toD vtrRR25) (toD vtrBF25)
       (toD vtrRR10) (toD vtrBF10)
 
-atmVol :: N a => [VolTableRow a] -> a -> a
-atmVol surface = \ t -> case Map.splitLookup t atms of
-  (_, Just atm, _) -> atm
+smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..} fwd =
+  trace (printf "let f=%f; kDNS=%f; k25dpMS=%f; k25dcMS=%f; c=%s" (toD f) (toD kDNS) (toD k25dpMS) (toD k25dcMS) (show [c0,c1,c2]))
+  solvedS
+  where
+    f = fwd t -- F_0,T
+    kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
+    solvedS = --sm [c0,c1,c2]
+      s [f,σatm,σ25dMS,t] [c0,c1,c2]
+    [c0,c1,c2] = fitSystem 3 [f,σatm,σ25dMS,t,kDNS,k25dpMS,k25dcMS] [0, 1, 1] $ \ i@[f,σatm,σ25dMS,t,kDNS,k25dpMS,k25dcMS] c ->
+      [s i c kDNS === σatm
+      ,s i c k25dpMS === σatm+σ25dMS
+      ,s i c k25dcMS === σatm+σ25dMS]
+    sm [c0, c1, c2] m = exp $ c0 + c1*normcdf m + c2*normcdf m^2
+    s (f:σatm:σ25dMS:t:_) [c0, c1, c2] k = exp $ fun $ log (f / k)
+      where
+        fun x = c0 + c1*d x + c2*d x^2
+        d x = normcdf (x / (σatm * sqrt t)) -- is d0=σatm?
+        -- normcdf of standartized moneyness
+    [k25dpMS, k25dcMS] =
+      fitSystem 2 [f, σatm, σ25dMS, t] [kDNS, kDNS]
+              $ \ [f, σatm, σ25dMS, t] [kp  , kc] ->
+        [pipsForwardDelta Put  f kp (σatm+σ25dMS) t === -0.25
+        ,pipsForwardDelta Call f kc (σatm+σ25dMS) t ===  0.25]
+
+infix 4 === -- same as ==
+
+x === y = x - y
+
+atmVol :: N a => [VolTableRow Tenor a] -> (a -> a) -> a -> a -> a
+atmVol surface fwd = flip smile fwd . volTableRow surface
+
+volTableRow :: N a => [VolTableRow Tenor a] -> a -> VolTableRow a a
+volTableRow surface = \ t -> case Map.splitLookup t rows of
+  (_, Just r, _) -> r { vtrTenor = t }
     -- FIXME: interpolate both upper and lower sections with two
     --        crossing step functions to make on-pillar AD Theta
     --        closer to the bump Theta?
   (l, _, r) -> case (Map.lookupMax l, Map.lookupMin r) of
-    (Just (t1, v1), Just (t2, v2)) ->
+    (Just (t1, r1), Just (t2, r2)) ->
+      let i w f = interp t t1 t2 w (f r1) (f r2) in
+        VolTableRow
+        { vtrTenor = t
+        , vtrATM  = i "ATM" vtrATM
+        , vtrRR25 = i "RR25" vtrRR25
+          -- interpolate like all delta conventions are the same
+        , vtrBF25 = i "BF25" vtrBF25
+        , vtrRR10 = i "RR10" vtrRR10
+        , vtrBF10 = i "BF10" vtrBF10
+        }
+    (Just (_,  r1), _            ) -> r1 { vtrTenor = t }
+    (_            , Just (t2, r2)) -> r2 { vtrTenor = t }
+    _ -> error "volTableRow: empty vol surface"
+  where
+    rows = Map.fromList
+      [(toN (tenorToYear vtrTenor), r) | r@VolTableRow{..} <- surface]
+    interp t t1 t2 (what::String) v1 v2 =
       -- Iain Clark, p65, Flat forward interpolation
       let v12 = (v2^2*t2 - v1^2*t1) / (t2 - t1) in
       if v12 < 0 then
-        error $ printf "atmVol: negative forward variance v12 = %.8f, t1=%f, v1=%f, t2=%f, v2=%f"
-          (toD v12) (toD t1) (toD v1) (toD t2) (toD v2)
+        error $ printf "volTableRow: negative %s forward variance v12 = %.8f, t1=%f, v1=%f, t2=%f, v2=%f"
+          what (toD v12) (toD t1) (toD v1) (toD t2) (toD v2)
       else
         sqrt $ (v1^2*t1 + v12 * (t - t1)) / t
-    (Just (_,  v1), _            ) -> v1
-    (_            , Just (t2, v2)) -> v2
-    _ -> error "atmVol: empty vol surface"
-  where
-    atms = Map.fromList
-      [(toN (tenorToYear vtrTenor), vtrATM) | VolTableRow{..} <- surface]
 
-testSurface :: N a => [VolTableRow a]
+testSurface :: N a => [VolTableRow Tenor a]
 testSurface =
   -- Copied from Iain Clark, p64, EURUSD
   --             ATM
@@ -606,19 +672,6 @@ testSurface =
       VolTableRow tenor (p (bid+ask) / 2) (p rr25) (p bf25) (p rr10) (p bf10)
     p x = x / 100
 
--- | dumb tenor to 365 days year conversion, no calendar/spot rules
-tenorToYear t = case reads t of
-  [(x, [unit])] -> x * y (toUpper unit)
-  _ -> error $ "Bad tenor " <> show t
-  where
-    d = 1/365
-    y = \ case
-      'D' -> d
-      'W' -> 7*d
-      'M' -> 1/12
-      'Y' -> 1
-      u -> error $ "Unknown unit " <> show u
-
 -- p = blackScholesPricer
 --     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
 -- mkt = \ case
@@ -635,7 +688,7 @@ m inp f = modify inp f mkt
 --solvePriceToVol price = solve (\ x -> p (modify GetATMVol (const $ const x) mkt) PV - price)
 
 fitTest :: [[Double]]
-fitTest = R.jacobian (\ is -> fitSystem 2 is $ \ [a,b,c] [x,y] ->
+fitTest = R.jacobian (\ is -> fitSystem 2 is [0.5, 0.5] $ \ [a,b,c] [x,y] ->
   [  x^2 + b*y**2.5 - 9
   ,a*x^2 -   y      - c]) [1,2,3]
 
@@ -653,9 +706,11 @@ fitSystem
   :: N a
   => Int -- ^ m = number of equations
   -> [a] -- ^ n inputs
+  -> [a] -- ^ m guesses
   -> (forall a . N a => [a] -> [a] -> [a]) -- ^ n inputs -> m guesses -> m results
   -> [a] -- ^ results with derivatives to inputs
-fitSystem m inputs system =
+fitSystem m inputs guesses system =
+--  trace (show _path) $
   zipWith
     (\ r dis ->
       realToFrac r + sum (zipWith explicitD (LA.toList dis) inputs))
@@ -672,14 +727,14 @@ fitSystem m inputs system =
       1e-10 1e-10 20
       (\ (LA.toList -> x) -> LA.fromList $ system inputsD x)
       (\ (LA.toList -> x) -> jr x)
-      (LA.fromList $ replicate m 0.5) -- initial guess
+      (LA.fromList $ map toD guesses)
     inputsD = map toD inputs
     n = length inputs
 
 test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
        , dgda `pct` fdgda, dgdb `pct` fdgdb)
   where
-    [[fdgda, fdgdb]] = R.jacobian (\ as -> fitSystem 1 as f) [ia,ib]
+    [[fdgda, fdgdb]] = R.jacobian (\ as -> fitSystem 1 as [0.5] f) [ia,ib]
     dgda = - (1/dx) * dfda
     dgdb = - (1/dx) * dfdb
     dgdaBump = bumpDiff (\ a -> nx a ib) ia 0.00001
@@ -770,13 +825,14 @@ plot = void $ GP.plotDefault $
 --      R.diff
 --      step (x - oStrike o)
 --   getPv mkt (const x)
-   dvdx' p (m Spot (const x)) PV Spot 0.0001
+--   dvdx' p (m Spot (const x)) PV Spot 0.0001
 --    dvdx' p (m RateDom (const x)) PV RateDom 0.0001
+     get GetATMVol mkt 5 x
   )
-  `mappend`
-  Plot2D.list Graph2D.boxes
-  [(spotAtT mkt x (oMaturityInYears o), 0.5::Double)
-  |x <- [-0.2,-0.199..0.2::Double]]
+--   `mappend`
+--   Plot2D.list Graph2D.boxes
+--   [(spotAtT mkt x (oMaturityInYears o), 0.5::Double)
+--   |x <- [-0.2,-0.199..0.2::Double]]
 
 plot3d = -- plotFunc3d [Custom "data" ["lines"],
 --                      Custom "surface" [], Custom "hidden3d" []] [Plot3dType Surface]
@@ -785,6 +841,9 @@ plot3d = -- plotFunc3d [Custom "data" ["lines"],
   (\s pd ->
     blackScholesPricer o (modify PricingDate (const pd) $ m Spot (const s)) PV
   )
+
+plotVolSurf = plotMeshFun [0.1,0.2..2::Double] [0.5,0.51..1.5::Double]
+  $ get GetATMVol mkt
 
 plotMeshFun xs ys f = plotMesh [[(x, y, f x y) | x <- xs] | y <- ys]
 
@@ -858,7 +917,7 @@ fem' nx nt market =
 --       <> [(iToLogSpot (nx+1), 0)]
     iterations = take (nt+1) (iterate ump1 (u0,0))
     τ = oMaturityInYears o - get PricingDate market
-    σ = get GetATMVol market τ
+    σ = get GetATMVol market τ 1
     rd = get RateDom market
     rf = get RateFor market
 --    r = rd-rf -- так получается d rf = - d rd

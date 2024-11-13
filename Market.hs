@@ -40,6 +40,8 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Unsafe.Coerce
 
+import Tenor
+
 -- | @Get n a@ some data from the @Market n@ with type @a@
 data Get n a where
   -- inputs (usually), not a separate type to make 'get' work uniformly
@@ -51,14 +53,12 @@ data Get n a where
   PricingDate :: Get a a
 
   -- nodes
-  GetATMVol :: Get a (a -> a)
+  GetATMVol   :: Get a (a -> a -> a)
+  ForwardRate :: Get a (a -> a)
 
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)
 deriving instance Show (Get n a)
-
-type Tenor = String
--- TODO: add a better sorting with a custom type
 
 data VolInput
   = ATMVol
@@ -161,4 +161,4 @@ mkt = buildMarket $ do
   input RateDom 0.1
   v1d <- input (Vol "1D" ATMVol) 0.1
   v1y <- input (Vol "1Y" ATMVol) 0.2
-  node GetATMVol $ (\ v1 v2 t -> v1*v2*t) <$> v1d <*> v1y
+  node GetATMVol $ (\ v1 v2 t k -> v1*v2*t) <$> v1d <*> v1y
