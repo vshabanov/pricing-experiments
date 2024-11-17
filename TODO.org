@@ -1,0 +1,29 @@
+#+STARTUP: indent
+
+* refactorings
+** move solving and smile fitting to separate modules
+** traversable/fmap for better passing of arguments in fitSystem?
+it's a monster
+** make market indepenent from the input type
+* Local-vol, make sure mc/fem match bs with implied vol
+* Implied vol smile calibration
+** Experiment with SABR, maybe it will fit in all scenarios?
+like BF=1% RR=0 that doesn't work now
+** Better interpolation
+RR interpolation is nonsence. Calibrate tenor smiles, then interpolate
+standartized ATM, P25, C25 vols and solve smile for these vols and
+corresponding strikes
+** Add BF10/RR10?
+** Market conventions?
+* Pay on touch fem/mc? Stoping time?
+* American FEM and monte carlo???
+* Chooser? Asian? TRF?
+* Different model (CEV, SABR, Stochastic, Mixed local-vol stochastic)
+* [MC] variance reduction
+* Payoff dependent mesh grading
+* [MC][parMap] Chunk jacobians, sumj . parMap grain=1 (jacobian . sum . Map pv path . Chunked gaussian)
+will use less RAM even in single threaded case
+* [MC] Check logspot (sigma...)<=log (barrier/spot), then we can s0*exp on the
+last one to get pv
+* [FEM] Check Greeks close to maturity and strike. Plot pv/delta vs spot on
+diff maturities (with forward ad, might need -O3)

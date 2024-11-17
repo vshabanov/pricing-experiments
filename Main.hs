@@ -3,6 +3,7 @@
 
 module Main (module Main) where
 
+import qualified Control.Exception as E
 import Data.Char
 import Control.DeepSeq
 import Data.Number.Erf
@@ -90,8 +91,8 @@ newtype Strike a = Strike { strike :: a }
 newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
   deriving (Num, Fractional, Floating, Erf)
 
-forwardRate :: Erf a => Market a -> MaturityInYears a -> a
-forwardRate market (MaturityInYears τ) = get ForwardRate market τ
+rates :: Market a -> Rates a
+rates m = Rates{s = get Spot m, rf = get RateFor m, rd = get RateDom m}
 
 digiPricer :: Erf a => Option a -> Market a -> Greek -> a
 digiPricer o market what = case what of
@@ -102,7 +103,7 @@ digiPricer o market what = case what of
     τ = oMaturityInYears o - m PricingDate
     φ = directionφ $ oDirection o
     x = m Spot
-    σ = get GetATMVol market τ k
+    σ = get ImpliedVol market τ k
     rd = m RateDom
     rf = m RateFor
     nc = normcdf
@@ -117,7 +118,7 @@ blackScholesPricer o market greek = bs greek BS{..}
     d = oDirection o
     t = oMaturityInYears o - m PricingDate
     s = m Spot
-    σ = m GetATMVol t k
+    σ = m ImpliedVol t k
     rf = m RateFor
     rd = m RateDom
     m i = get i market
@@ -144,7 +145,7 @@ oneTouchPricer ot market PV =
     η = barrierPositionη $ otBarrierPosition ot
     ω = payOnω $ otPayOn ot
     x = m Spot
-    σ = m GetATMVol τ b
+    σ = m ImpliedVol τ b
     rd = m RateDom
     rf = m RateFor
     θp = (rd-rf)/σ + σ/2
@@ -175,7 +176,7 @@ spotAtT market ϵ τ =
   where
     μ̂ = rd - rf
     s0 = m Spot
-    σ = m GetATMVol τ 1
+    σ = m ImpliedVol τ 1
     rd = m RateDom
     rf = m RateFor
     m i = get i market
@@ -186,7 +187,7 @@ spotPath market dτ es =
   where
     μ̂ = rd - rf
     s0 = m Spot
-    σ = m GetATMVol (dτ * toEnum (length es)) 1
+    σ = m ImpliedVol (dτ * toEnum (length es)) 1
     rd = m RateDom
     rf = m RateFor
     m i = get i market
@@ -380,9 +381,9 @@ integrated' n mkt = realToFrac step * treeSum
 o :: Erf a => Option a
 o = Option
   { oStrike =
-    1.0
+    1.3
 --    forwardRate mkt (oMaturityInYears o)
-  , oMaturityInYears = 1.2 -- 0.1/365
+  , oMaturityInYears = 1 -- 0.1/365
   , oDirection = Call }
 ot :: Erf a => OneTouch a
 ot = OneTouch
@@ -418,14 +419,14 @@ compareToAnalytic !g =
     gs = zip (map fst $ inputs (mkt :: Market Double)) g
     mapping =
       [(Delta, [Spot])
-      ,(Vega, [i | (i@Vol {},_) <- gs])
+      ,(Vega, [i | (i@(Vol _ ATMVol),_) <- gs])
       ,(RhoDom, [RateDom])
       ,(RhoFor, [RateFor])
       ,(Theta, [PricingDate])]
 greeksAD = snd $ jacobianPvGreeks (flip p PV)
 greeksADMonteCarlo = snd $ jacobianPvGreeks monteCarlo
 
-newtype Percent = Percent Double
+newtype Percent = Percent { unPercent :: Double }
 instance Show Percent where show (Percent p) = printf "%.5f%%" p
 pct a b
   | a == b = Percent 0
@@ -462,20 +463,20 @@ jacobianPvGreeks pricer =
 --     (forwardPricer Forward { fStrike = 1.2, fMaturityInYears = 3/12 })
 mkt :: N a => Market a
 mkt = buildMarket $ do
-  s <- input Spot 1
-  rd <- input RateDom 0.05
-  rf <- input RateFor 0.03
+--   s <- input Spot 1
+--   rf <- input RateFor 0.03
+--   rd <- input RateDom 0.05
+  s <- input Spot 1.3465
+  rf <- input RateFor 0.0346 -- discount 0.966001?  exp (-0.0346) = 0.965992
+  rd <- input RateDom 0.0294 -- discount 0.971049?  exp (-0.0294) = 0.971028
   pd <- input PricingDate 0
-
-  forwardRate <- node ForwardRate $ (\ s rd rf pd t -> s * exp ((rd-rf)*(t-pd)))
-    <$> s <*> rd <*> rf <*> pd
 
 --   let flatRow tenor x = do
 --         i <- input (Vol tenor ATMVol) x
 --         pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
 --   v1 <- flatRow  "11M" 0.1
 --   v2 <- flatRow "13M" 0.2
---   node GetATMVol $ atmVol <$> sequenceA [v1, v2]
+--   node ImpliedVol $ atmVol <$> sequenceA [v1, v2]
   let flatRow tenor x = do
         i <- input (Vol tenor ATMVol) x
         pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
@@ -495,8 +496,8 @@ mkt = buildMarket $ do
           , vtrRR10 = rr10
           , vtrBF10 = bf10
           }) <$> sequenceA inputs
-  s <- mapM rowNode testSurface
-  node GetATMVol $ atmVol <$> sequenceA s <*> forwardRate
+  surf <- mapM rowNode testSurface
+  node ImpliedVol $ atmVol <$> sequenceA surf <*> (Rates <$> s <*> rf <*> rd)
 
 data VolTableRow t a
   = VolTableRow
@@ -514,64 +515,154 @@ instance (Show t, N a) => Show (VolTableRow t a) where
       (show vtrTenor) (toD vtrATM) (toD vtrRR25) (toD vtrBF25)
       (toD vtrRR10) (toD vtrBF10)
 
-g = get GetATMVol mkt 1 1 :: Double
+g = forM_ [0.01,0.02..2] $ \ t -> do
+  print t
+  volSens (\ mkt -> get ImpliedVol mkt (toN t) 1.3)
+    `E.catch` \ (e :: E.SomeException) -> print e
 
-smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..} fwd =
-  trace (printf "let t=%f; f=%f; σatm=%f; σ25dMS=%f; σ25dRR=%f; kDNS=%f; k25dpMS=%f; k25dcMS=%f; k25dp=%f; k25dc=%f; c=%s" (toD t) (toD f) (toD σatm) (toD σ25dMS) (toD σ25dRR) (toD kDNS) (toD k25dpMS) (toD k25dcMS) (toD k25dp) (toD k25dc) (show [c0,c1,c2]))
+volSens :: (forall a . N a => Market a -> a) -> IO ()
+volSens f = putStrLn $ unlines
+  [printf "%-15s %12.6g %12.6g %15s" (show v) x d (show $ d `pct` x)
+  |((v@Vol {},_), x) <- zip (inputs mkt) $ snd $ jacobianPvGreeks f, x /= 0
+  ,let d = dvdx' (\ m () -> f m) mkt () v 0.000001
+  ]
+
+smile :: N a => VolTableRow a a -> Rates a -> a -> a
+smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..} rates@Rates{s,rf,rd} =
+--   trace (unlines $
+--       [ printf "%-12s %.8f  %.5f%%" n (toD k) (toD $ solvedS k * 100)
+--       | (n::String,k) <-
+--         [("k25-d-P"   , k25dp)
+--         ,("k25-d-P-MS", k25dpMS)
+--         ,("kDNS"      , kDNS)
+--         ,("k25-d-C"   , k25dc)
+--         ,("k25-d-C-MS", k25dcMS)]]
+--       <>
+--       [ printf "%-12s %10.7f" n (toD p)
+--       | (n::String,p) <-
+--         [("σatm", σatm)
+--         ,("σ25dMS", σ25dMS)
+--         ,("σ25dRR", σ25dRR)
+--         ,("σ25dSS", σ25dSS)
+--         ,("σ25dSS via smile", 1/2*(solvedS k25dc + solvedS k25dp) - solvedS kDNS)
+--         ,("t", t)
+--         ,("f", f)
+--         ,("v25dMS", v25dMS)
+--         ,("vMS", vStrangle r k25dpMS (solvedS k25dpMS) k25dcMS (solvedS k25dcMS))
+--         ,("vSS", vStrangle r k25dp   (solvedS k25dp)   k25dc   (solvedS k25dc))
+--         ,("c0", c0)
+--         ,("c1", c1)
+--         ,("c2", c2)
+--         ]]) $
   solvedS
   where
-    f = fwd t -- F_0,T
+    pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ solvedS k * 100) (toD $ s*100)
+    f = forwardRate rates t -- F_0,T
     kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
-    solvedS = --sm [c0,c1,c2]
-      smile' [f,t,σatm] [c0,c1,c2]
+    solvedS = -- trace (show $ toD kDNS)
+      polynomialInDeltaExpC0 f t [c0,c1,c2]
     ϕRR :: Num a => a
     ϕRR = 1 -- convention, could be -1
-    [c0,c1,c2,k25dp,k25dc] =
-      fitSystem 8 [f,t,σatm,σ25dMS,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS]
-                  [0, 1, 1, kDNS, kDNS]
-            $ \ i@[f,t,σatm,σ25dMS,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS]
-                c@[c0,c1,c2,k25dp,k25dc] ->
-      let s = smile' i c
-          pfd d k = fbs PipsForwardDelta FBS{k,d,t,f,σ=s k}
-      -- TODO: check how well things are fitted
-      -- what does 9.241767024140224e-3 error in _path mean?
+
+    eitherToError = either error id
+    [c0,c1,c2,k25dp,k25dc] = fitSS [f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS]
+      σ25dSS
+
+    [σ25dSS] = -- [σ25dMS]
+      fitSystemThrow
+              [f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS] [σ25dMS]
+      $ \ env@[f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS] [σ25dSS] ->
+      let [c0,c1,c2,_k25dp,_k25dc] = fitSS env σ25dSS
+          r = RatesT{s,rf,rd,t}
+          sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
       in
-      [s kDNS === σatm
-      ,s k25dpMS === σatm+σ25dMS
-      ,s k25dcMS === σatm+σ25dMS
-      ,σ25dRR === ϕRR*(s k25dc - s k25dp)
-      ,pfd Put  k25dp === -0.25 -- smile 25D, not Black-Scholes
-      ,pfd Call k25dc ===  0.25
-      ,v25dMS ===
-          fbs FV FBS{k=k25dpMS,d=Put ,t,f,σ=s k25dpMS}
-        + fbs FV FBS{k=k25dcMS,d=Call,t,f,σ=s k25dcMS}
-      ,v25dMS ===
-          fbs FV FBS{k=k25dp  ,d=Put ,t,f,σ=s k25dp}
-        + fbs FV FBS{k=k25dc  ,d=Call,t,f,σ=s k25dc}
+        [vStrangle r k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS]
+    fitSS :: N a => [a] -> a -> [a]
+    fitSS env@[f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS] σ25dSS =
+      fitSystemThrow
+                (σ25dSS:env)
+                [-2, -0.1, 0.1, k25dpMS, k25dcMS]
+          $ \ i@[σ25dSS,f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS]
+              c@[c0,c1,c2,k25dp,k25dc] ->
+      let sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
+          r = RatesT{s,rf,rd,t}
+          delta d k = bs Delta BS{k,d,σ=sm k,s,rf,rd,t}
+          -- PipsForwardDelta
+      in
+      -- Converges on the vol table, and on BF=RR=0
+      -- but fails on BF=1% and RR=0 or some other number
+      -- seems that polynomialInDeltaExpC0 is not flexible enough
+      -- for pure symmetric smiles.
+      [ sm kDNS === σatm
+--       , ϕRR*(sm k25dc - sm k25dp) === σ25dRR
+--       , 1/2*(sm k25dc + sm k25dp) - sm kDNS === σ25dSS
+      , sm k25dc === sm k25dp + σ25dRR
+      , 1/2*(sm k25dc + sm k25dp) === sm kDNS + σ25dSS
+        --  ^ reordered to use division in (===) for better error estimates
+      , delta Put  k25dp === -0.25 -- smile 25D, not Black-Scholes
+      , delta Call k25dc ===  0.25
       ]
---    sm [c0, c1, c2] m = exp $ c0 + c1*normcdf m + c2*normcdf m^2
-    smile' (f:t:σatm:_) (c0:c1:c2:_) k = exp $ fun $ log (f / k)
-      where
-        fun x = c0 + c1*d x + c2*d x^2 -- + c3*d x^3
-        -- can't fit c3, maybe it'll work with rr10/bf10
-        d x = normcdf (x / (σatm * sqrt t)) -- is d0=σatm?
-        -- normcdf of standartized moneyness
-    v25dMS =
-        fbs FV FBS{k=k25dpMS,d=Put ,t,f,σ=σatm+σ25dMS}
-      + fbs FV FBS{k=k25dcMS,d=Call,t,f,σ=σatm+σ25dMS}
+    v25dMS = vStrangle r k25dpMS (σatm+σ25dMS) k25dcMS (σatm+σ25dMS)
+    r = RatesT{s,rf,rd,t}
+    vStrangle RatesT{s,rf,rd,t} kp σp kc σc =
+        bs PV BS{k=kp,d=Put ,σ=σp,s,rf,rd,t}
+      + bs PV BS{k=kc,d=Call,σ=σc,s,rf,rd,t}
     [k25dpMS, k25dcMS] =
-      fitSystem 2 [f, σatm, σ25dMS, t] [kDNS, kDNS]
-              $ \ [f, σatm, σ25dMS, t] [kp  , kc] ->
-        let pfd d k = fbs PipsForwardDelta FBS{k,d,t,f,σ=σatm+σ25dMS} in
-        [pfd Put  kp === -0.25
-        ,pfd Call kc ===  0.25]
+      fitSystemThrow
+          [σatm, σ25dMS, t,s,rf,rd] [kDNS, kDNS]
+      $ \ [σatm, σ25dMS, t,s,rf,rd] [kp  , kc] ->
+        let delta d k = bs Delta BS{k,d,t,s,rf,rd,σ=σatm+σ25dMS} in
+        [delta Put  kp === -0.25
+        ,delta Call kc ===  0.25]
+
+iainsTable3_5 :: Fractional a => (String -> a -> a -> b) -> [b]
+iainsTable3_5 f0 =
+  [f "k25-d-P"    1.2034 19.50
+  ,f "k25-d-P-MS" 1.2050 19.48
+  ,f "kATM"       1.3620 18.25
+  ,f "k25-d-C"    1.5410 18.90
+  ,f "k25-d-C-MS" 1.5449 18.92]
+  where f n k s = f0 n k (s/100)
+
+iainsDiff = mapM_ putStrLn $ iainsTable3_5 $ \ n k s ->
+  printf "%-12s %.4f  %.2f%% (table %.2f%%, %9s)" n k (iains k * 100) (s*100)
+  (show $ iains k `pct` s)
+iains x = polynomialInDeltaExpC0 1.3395163731662 1
+--  [-1.701005, 0.050131, 0.800801]
+--  ^ example in the book is wrong, values don't match iainsTable3_5
+  [-1.4606627150883185,-1.0877333376976042,1.2259367762563833]
+  --  ^ these have 0.034% error (0.024% max)
+  x
+iainsCS :: [Double] =
+  fitSystemThrow [] [-2,-0.1,0.1]
+             $ \ [] [c0,c1,c2] ->
+    iainsTable3_5 $ \ _ k σ ->
+      polynomialInDeltaExpC0 1.3395163731662 1 [c0,c1,c2] k === σ
+      -- doesn't converge, 1e-5 error
+
+polynomialInDelta f t [c0,c1,c2,c3] k = exp $ fun $ log (f / k)
+  where
+    fun x = c0 + c1*δ x + c2*δ x^2 -- + c3*d x^3
+    -- can't fit c3, maybe it'll work with rr10/bf10
+    σ0 = c3
+    δ x = normcdf (x / (σ0 * sqrt t))
+    -- normcdf of standartized moneyness
+
+polynomialInDeltaExpC0 f t [c0,c1,c2] k =
+--  c0 + c1*(f/k) + c2*(f/k)^2
+--  ^ fits very nice, but has huge negative numbers on range ends
+  exp $ fun $ log (f / k)
+  where
+    fun x = c0 + c1*δ x + c2*δ x^2
+    σ0 = exp c0
+    δ x = normcdf (x / (σ0 * sqrt t))
 
 infix 4 === -- same as ==
 
-x === y = x - y
+x === y = (x - y)/y  -- /y may cause division by zero
 
-atmVol :: N a => [VolTableRow Tenor a] -> (a -> a) -> a -> a -> a
-atmVol surface fwd = flip smile fwd . volTableRow surface
+atmVol :: N a => [VolTableRow Tenor a] -> Rates a -> a -> a -> a
+atmVol surface rates = flip smile rates . volTableRow surface
 
 volTableRow :: N a => [VolTableRow Tenor a] -> a -> VolTableRow a a
 volTableRow surface = \ t -> case Map.splitLookup t rows of
@@ -586,7 +677,7 @@ volTableRow surface = \ t -> case Map.splitLookup t rows of
         { vtrTenor = t
         , vtrATM  = i "ATM" vtrATM
         , vtrRR25 = - i "RR25" (abs . vtrRR25)
-          -- it makes no sense to interpolate difference between volatilities
+          -- TODO: it makes no sense to interpolate difference between volatilities
           -- we should first calibrate two smiles, get kATM/P25/C25,
           -- their vols, interpolate strikes and vols
           -- and calibrate new smile.
@@ -622,7 +713,9 @@ testSurface =
   ,r  "1M"  11.540  12.040  (-1.660)   0.260  (-3.042)  0.795
   ,r  "2M"  11.605  12.006  (-1.667)   0.315  (-3.075)  0.990
   ,r  "3M"  11.795  12.195  (-1.677)   0.365  (-3.103)  1.165
+--   ,r  "6M"  12.340  12.690  (0)   0  (-3.132)  1.460
   ,r  "6M"  12.340  12.690  (-1.680)   0.445  (-3.132)  1.460
+--   ,r  "1Y"  18.25  18.25  (-0.6)   0.95  (-1.359)  3.806 -- Table 3.3 p50
   ,r  "1Y"  12.590  12.915  (-1.683)   0.520  (-3.158)  1.743
   ,r "18M"  12.420  12.750  (-1.577)   0.525  (-3.000)  1.735
   ,r  "2Y"  12.315  12.665  (-1.520)   0.495  (-2.872)  1.665
@@ -648,12 +741,22 @@ test' what rd = p (modify RateDom (const rd) mkt) what
 
 m inp f = modify inp f mkt
 
---solvePriceToVol price = solve (\ x -> p (modify GetATMVol (const $ const x) mkt) PV - price)
+--solvePriceToVol price = solve (\ x -> p (modify ImpliedVol (const $ const x) mkt) PV - price)
 
-fitTest :: [[Double]]
-fitTest = R.jacobian (\ is -> fitSystem 2 is [0.5, 0.5] $ \ [a,b,c] [x,y] ->
+fitTest :: [(Double, [Double])]
+fitTest = R.jacobian' (\ [a,b,c] -> fitSystemThrow [a,b,c] [0.5, 0.5, 0.5] $ \ [a,b,c] [x,y,z] ->
   [  x^2 + b*y**2.5 - 9
-  ,a*x^2 -   y      - c]) [1,2,3]
+  ,a*x^2 -   y      - c
+  ,  y - x + z
+  ]) [1-0.0001,2,3]
+
+fitSystemThrow
+  :: N a
+  => [a] -- ^ n inputs
+  -> [a] -- ^ m guesses
+  -> (forall a . N a => [a] -> [a] -> [a]) -- ^ n inputs -> m guesses -> m results
+  -> [a] -- ^ results with derivatives to inputs
+fitSystemThrow i g f = either error id $ fitSystem i g f
 
 -- | Solve a system of non-linear equations for a set of inputs.
 --
@@ -667,44 +770,81 @@ fitTest = R.jacobian (\ is -> fitSystem 2 is [0.5, 0.5] $ \ [a,b,c] [x,y] ->
 -- (m parameters -> m equations = 0) into an AD framework.
 fitSystem
   :: N a
-  => Int -- ^ me = number of equations, can be >m as we do fitting
-  -> [a] -- ^ n inputs
+  => [a] -- ^ n inputs
   -> [a] -- ^ m guesses
   -> (forall a . N a => [a] -> [a] -> [a]) -- ^ n inputs -> m guesses -> m results
-  -> [a] -- ^ results with derivatives to inputs
-fitSystem me inputs guesses system =
---  trace (show _path) $
-  zipWith
+  -> Either String [a] -- ^ results with derivatives to inputs
+fitSystem inputs guesses system0
+  | me < m = error $ mconcat ["Can’t fit ", show m, " variables with "
+    , show me, " equations"]
+  | err > 1e-10 = -- sum of squared residuals (sum . map (^2))
+    -- if there's a big error, there's a big chance that
+    --  * LA.inv will fail with a singular matrix
+    --  * LA.inv will not fail, but derivatives will be incorrect
+    --    (either completely missing out some of the dependencies,
+    --    or be off)
+    Left $ printf
+      "Didn't converge after %.0f iterations:\n\
+      \  error           %10.3g\n\
+      \%s\
+      \  inputs          %s\n\
+      \  initial guesses %s\n\
+      \  last guesses    %s\n\
+      \  difference      %s"
+    nIterations err
+    (unlines $
+     zipWith (\ i e -> printf "    %2d %10.7f%%" (i::Int) (e*100))
+       [0..] $ system inputsD lastGuesses)
+    (showDL inputsD) (showDL guessesD) (showDL lastGuesses)
+    (unwords $ map fmtP $ zipWith pct lastGuesses guessesD)
+  | otherwise =
+--   trace (show path) $
+--   map realToFrac results
+  Right $ zipWith
     (\ r dis ->
       realToFrac r + sum (zipWith explicitD (LA.toList dis) inputs))
     results (LA.toRows jResultsInputs)
   where
+    fmtP (Percent p)
+      | abs p < 5 && abs p > 0.0001 = printf "%9.5f%%" p
+      | otherwise = printf "%10.3e" (p/100)
+    fmtD = printf "%10.3g" -- 1.123e-197 is 10 characters
+    showDL = unwords . map fmtD
+    (nIterations:err:lastGuesses) = LA.toList $ last $ LA.toRows path
+    me = length $ system0 inputs guesses -- determine the number of equations
+    system is gs
+      | length es /= me = error $ "system returned " <> show (length es)
+        <> " equations instead of " <> show me
+      | otherwise = es
+      where es = system0 is gs
     -- Jacobian of results to inputs via the implicit function theorem
     -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
-    jResultsInputs = (- (LA.inv $ jr results)) <> ji inputsD
+    jResultsInputs = -- trace (show (jr results, guesses, inputsD, results)) $
+      (- (LA.inv $ jr results)) <> ji inputsD
     jr  = matrix m  m . R.jacobian (\ r -> system (map realToFrac inputs) r)
     jrg = matrix me m . R.jacobian (\ r -> system (map realToFrac inputs) r)
     ji  = matrix m  n . R.jacobian (\ i -> system i (map toN results))
+    combine s = foldl1 (zipWith (+))
+      $ chunksOf m (s + replicate (m - (me `mod` m)) 0)
     matrix m n = (LA.><) m n . concat -- == LA.fromLists
-    (LA.toList -> results, _path) =
+    (LA.toList -> results, path) =
       nlFitting LevenbergMarquardtScaled
       1e-10 -- error
       1e-10 -- per-iteration change in the error to stop if the
             -- fitting error can no longer be improved
-      20 -- max iterations
-      -- TODO: error if not fitted? The matrix inversion above will
-      -- most definitely break as well
+      100 -- max iterations
       (\ (LA.toList -> x) -> LA.fromList $ system inputsD x)
       (\ (LA.toList -> x) -> jrg x)
-      (LA.fromList $ map toD guesses)
+      (LA.fromList guessesD)
     inputsD = map toD inputs
+    guessesD = map toD guesses
     m = length guesses
     n = length inputs
 
 test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
        , dgda `pct` fdgda, dgdb `pct` fdgdb)
   where
-    [[fdgda, fdgdb]] = R.jacobian (\ as -> fitSystem 1 as [0.5] f) [ia,ib]
+    [[fdgda, fdgdb]] = R.jacobian (\ as -> fitSystemThrow as [0.5] f) [ia,ib]
     dgda = - (1/dx) * dfda
     dgdb = - (1/dx) * dfdb
     dgdaBump = bumpDiff (\ a -> nx a ib) ia 0.00001
@@ -751,16 +891,13 @@ solve f = go 0 (-10) 10
 symd f x part bump = (f (x+part*bump) - f (x-part*bump)) / (2*bump)
 
 bumpDiff f x bump = (f (x+bump) - f (x-bump)) / (2*bump)
-dvdx'
-  :: N n => (Market n -> a -> n)
-     -> Market n -> a -> Get n n -> n -> n
-dvdx' p mkt what x (bump :: n)
---     | mkt x > bump =
---         (p (modify x (* (1+bump)) mkt) what -
---          p (modify x (* (1-bump)) mkt) what) / (2*bump*mkt x)
-    | otherwise =
-        (p (modify x (+bump) mkt) what -
-         p (modify x (+ (-bump)) mkt) what) / (2*bump)
+dvdxUp :: N n => (Market n -> a -> n) -> Market n -> a -> Get n n -> n -> n
+dvdxUp p mkt what x (bump :: n) =
+  (p (modify x (+bump) mkt) what - p mkt what) / bump
+dvdx' :: N n => (Market n -> a -> n) -> Market n -> a -> Get n n -> n -> n
+dvdx' p mkt what x (bump :: n) =
+  (p (modify x (+   bump ) mkt) what -
+   p (modify x (+ (-bump)) mkt) what) / (2*bump)
 dvdx = dvdx' p mkt
 dvdx2 what x bump = dvdx' (\ m w -> dvdx' p m w x bump) mkt what x bump
 dvdd what x1 x2 bump = dvdx' (\ m w -> dvdx' p m w x2 bump) mkt what x1 bump
@@ -797,7 +934,7 @@ plot = void $ GP.plotDefault $
 --   getPv mkt (const x)
 --   dvdx' p (m Spot (const x)) PV Spot 0.0001
 --    dvdx' p (m RateDom (const x)) PV RateDom 0.0001
-     get GetATMVol mkt 5 x
+     get ImpliedVol mkt 5 x
   )
 --   `mappend`
 --   Plot2D.list Graph2D.boxes
@@ -812,8 +949,8 @@ plot3d = -- plotFunc3d [Custom "data" ["lines"],
     blackScholesPricer o (modify PricingDate (const pd) $ m Spot (const s)) PV
   )
 
-plotVolSurf = plotMeshFun [0.1,0.11..2] [0.5,0.51..1.5::Double]
-  $ get GetATMVol mkt
+plotVolSurf = plotMeshFun [0.1,0.11..2] [0.5,0.51..2::Double]
+  $ get ImpliedVol mkt
 
 plotMeshFun xs ys f =
   plotMesh $ sort [[(x, y, f' y) | y <- ys] | x <- xs, let !f' = f x]
@@ -888,7 +1025,7 @@ fem' nx nt market =
 --       <> [(iToLogSpot (nx+1), 0)]
     iterations = take (nt+1) (iterate ump1 (u0,0))
     τ = oMaturityInYears o - get PricingDate market
-    σ = get GetATMVol market τ 1
+    σ = get ImpliedVol market τ (oStrike o)
     rd = get RateDom market
     rf = get RateFor market
 --    r = rd-rf -- так получается d rf = - d rd
@@ -964,7 +1101,8 @@ gradeSpot x
 --   | otherwise = 1 - 2*(1-x)^2
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
-main = defaultMain
+main = g
+_main = defaultMain
   [ bgroup "fem" (map benchFem [(100,100), (100,500), (500,100), (500,500)])
   , bgroup "integrated" (map benchIntegrated [1000, 10000, 100000, 1000000])
   , bgroup "gaussian" (map benchGaussian [1000, 10000, 100000])

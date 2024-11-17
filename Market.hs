@@ -53,8 +53,7 @@ data Get n a where
   PricingDate :: Get a a
 
   -- nodes
-  GetATMVol   :: Get a (a -> a -> a)
-  ForwardRate :: Get a (a -> a)
+  ImpliedVol :: Get a (a -> a -> a) -- ^ time -> strike -> implied vol
 
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)
@@ -161,4 +160,4 @@ mkt = buildMarket $ do
   input RateDom 0.1
   v1d <- input (Vol "1D" ATMVol) 0.1
   v1y <- input (Vol "1Y" ATMVol) 0.2
-  node GetATMVol $ (\ v1 v2 t k -> v1*v2*t) <$> v1d <*> v1y
+  node ImpliedVol $ (\ v1 v2 t k -> v1*v2*t) <$> v1d <*> v1y
