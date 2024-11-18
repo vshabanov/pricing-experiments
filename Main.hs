@@ -1,5 +1,5 @@
-{-# LANGUAGE MagicHash, ScopedTypeVariables #-}
-{-# OPTIONS_GHC -Wno-x-partial -Wno-gadt-mono-local-binds #-}
+{-# LANGUAGE MagicHash, ScopedTypeVariables, CPP #-}
+{-# OPTIONS_GHC -Wno-x-partial -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
 
 module Main (module Main) where
 
@@ -8,11 +8,15 @@ import Data.Char
 import Control.DeepSeq
 import Data.Number.Erf
 
+import GHC.Generics
+import qualified Control.Monad.State.Strict as S
 import qualified Data.Map.Strict as Map
 import Data.Array
 import Debug.Trace
 import Data.Monoid
 import Data.List.Split
+import Data.Foldable
+import Data.Functor.Identity
 import Criterion.Main
 import Graphics.Gnuplot.Simple
 
@@ -32,7 +36,6 @@ import Graphics.Gnuplot.Plot.TwoDimensional (linearScale, )
 
 import qualified Graphics.Gnuplot.LineSpecification as LineSpec
 import Graphics.Gnuplot.Value.Tuple (Label(Label))
-
 
 import Data.Maybe
 import System.Random
@@ -480,40 +483,23 @@ mkt = buildMarket $ do
   let flatRow tenor x = do
         i <- input (Vol tenor ATMVol) x
         pure $ (\ i -> VolTableRow tenor i 0 0 0 0) <$> i
-  let rowNode VolTableRow{vtrTenor=t,..} = do
+  let rowNode VolTableRow{t=t,..} = do
         inputs <- sequence
-          [input (Vol t ATMVol) vtrATM
-          ,input (Vol t RR25)   vtrRR25
-          ,input (Vol t BF25)   vtrBF25
-          ,input (Vol t RR10)   vtrRR10
-          ,input (Vol t BF10)   vtrBF10]
-        pure $ (\ [atm, rr25, bf25, rr10, bf10] ->
-          VolTableRow
-          { vtrTenor = t
-          , vtrATM  = atm
-          , vtrRR25 = rr25
-          , vtrBF25 = bf25
-          , vtrRR10 = rr10
-          , vtrBF10 = bf10
-          }) <$> sequenceA inputs
+          [input (Vol t ATMVol) σatm
+          ,input (Vol t RR25)   σrr25
+          ,input (Vol t BF25)   σbf25
+          ,input (Vol t RR10)   σrr10
+          ,input (Vol t BF10)   σbf10]
+        pure $ (\ [σatm, σrr25, σbf25, σrr10, σbf10] -> VolTableRow{..})
+          <$> sequenceA inputs
   surf <- mapM rowNode testSurface
   node ImpliedVol $ atmVol <$> sequenceA surf <*> (Rates <$> s <*> rf <*> rd)
-
-data VolTableRow t a
-  = VolTableRow
-    { vtrTenor :: t
-    , vtrATM :: a
-    , vtrRR25 :: a
-    , vtrBF25 :: a
-    , vtrRR10 :: a
-    , vtrBF10 :: a
-    }
 
 instance (Show t, N a) => Show (VolTableRow t a) where
   show (VolTableRow {..}) =
     printf "%3s %7.3f %7.3f %7.3f %7.3f %7.3f"
-      (show vtrTenor) (toD vtrATM) (toD vtrRR25) (toD vtrBF25)
-      (toD vtrRR10) (toD vtrBF10)
+      (show t) (toD σatm) (toD σrr25) (toD σbf25)
+      (toD σrr10) (toD σbf10)
 
 g = forM_ [0.01,0.02..2] $ \ t -> do
   print t
@@ -528,7 +514,7 @@ volSens f = putStrLn $ unlines
   ]
 
 smile :: N a => VolTableRow a a -> Rates a -> a -> a
-smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..} rates@Rates{s,rf,rd} =
+smile v@VolTableRow{t,σatm,σbf25,σrr25,..} rates@Rates{s,rf,rd} =
 --   trace (unlines $
 --       [ printf "%-12s %.8f  %.5f%%" n (toD k) (toD $ solvedS k * 100)
 --       | (n::String,k) <-
@@ -541,8 +527,8 @@ smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..
 --       [ printf "%-12s %10.7f" n (toD p)
 --       | (n::String,p) <-
 --         [("σatm", σatm)
---         ,("σ25dMS", σ25dMS)
---         ,("σ25dRR", σ25dRR)
+--         ,("σbf25", σbf25)
+--         ,("σrr25", σrr25)
 --         ,("σ25dSS", σ25dSS)
 --         ,("σ25dSS via smile", 1/2*(solvedS k25dc + solvedS k25dp) - solvedS kDNS)
 --         ,("t", t)
@@ -564,28 +550,21 @@ smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..
     ϕRR :: Num a => a
     ϕRR = 1 -- convention, could be -1
 
-    eitherToError = either error id
-    [c0,c1,c2,k25dp,k25dc] = fitSS [f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS]
-      σ25dSS
+    -- input variables passed between solvers
+    #define env (T11 f s rf rd t σatm σrr25 kDNS k25dpMS k25dcMS v25dMS)
 
-    [σ25dSS] = -- [σ25dMS]
-      fitSystemThrow
-              [f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS] [σ25dMS]
-      $ \ env@[f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS] [σ25dSS] ->
-      let [c0,c1,c2,_k25dp,_k25dc] = fitSS env σ25dSS
-          r = RatesT{s,rf,rd,t}
+    T5 c0 c1 c2 k25dp k25dc = fitSS env σ25dSS
+
+    [σ25dSS] = -- [σbf25]
+      fitSystemThrow env [σbf25] $ \ env [σ25dSS] ->
+      let T5 c0 c1 c2 _k25dp _k25dc = fitSS env σ25dSS
           sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
       in
-        [vStrangle r k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS]
-    fitSS :: N a => [a] -> a -> [a]
-    fitSS env@[f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS] σ25dSS =
-      fitSystemThrow
-                (σ25dSS:env)
-                [-2, -0.1, 0.1, k25dpMS, k25dcMS]
-          $ \ i@[σ25dSS,f,s,rf,rd,t,σatm,σ25dRR,kDNS,k25dpMS,k25dcMS,v25dMS]
-              c@[c0,c1,c2,k25dp,k25dc] ->
+        [vStrangle env k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS]
+    fitSS env σ25dSS =
+      fitSystemThrow (T σ25dSS env) (T5 (-2) (-0.1) 0.1 k25dpMS k25dcMS)
+                 $ \ (T σ25dSS env) (T5 c0 c1 c2 k25dp k25dc) ->
       let sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
-          r = RatesT{s,rf,rd,t}
           delta d k = bs Delta BS{k,d,σ=sm k,s,rf,rd,t}
           -- PipsForwardDelta
       in
@@ -594,26 +573,50 @@ smile VolTableRow{vtrTenor=t, vtrATM=σatm, vtrBF25=σ25dMS, vtrRR25=σ25dRR, ..
       -- seems that polynomialInDeltaExpC0 is not flexible enough
       -- for pure symmetric smiles.
       [ sm kDNS === σatm
---       , ϕRR*(sm k25dc - sm k25dp) === σ25dRR
+--       , ϕRR*(sm k25dc - sm k25dp) === σrr25
 --       , 1/2*(sm k25dc + sm k25dp) - sm kDNS === σ25dSS
-      , sm k25dc === sm k25dp + σ25dRR
+      , sm k25dc === sm k25dp + σrr25
       , 1/2*(sm k25dc + sm k25dp) === sm kDNS + σ25dSS
         --  ^ reordered to use division in (===) for better error estimates
       , delta Put  k25dp === -0.25 -- smile 25D, not Black-Scholes
       , delta Call k25dc ===  0.25
       ]
-    v25dMS = vStrangle r k25dpMS (σatm+σ25dMS) k25dcMS (σatm+σ25dMS)
-    r = RatesT{s,rf,rd,t}
-    vStrangle RatesT{s,rf,rd,t} kp σp kc σc =
+    v25dMS = vStrangle env k25dpMS (σatm+σbf25) k25dcMS (σatm+σbf25)
+    vStrangle env kp σp kc σc =
         bs PV BS{k=kp,d=Put ,σ=σp,s,rf,rd,t}
       + bs PV BS{k=kc,d=Call,σ=σc,s,rf,rd,t}
-    [k25dpMS, k25dcMS] =
-      fitSystemThrow
-          [σatm, σ25dMS, t,s,rf,rd] [kDNS, kDNS]
-      $ \ [σatm, σ25dMS, t,s,rf,rd] [kp  , kc] ->
-        let delta d k = bs Delta BS{k,d,t,s,rf,rd,σ=σatm+σ25dMS} in
+
+    #undef env
+
+    #define env (T6 σatm σbf25 t s rf rd)
+
+    T2 k25dpMS k25dcMS =
+      fitSystemThrow env (T2 kDNS kDNS) $ \ env (T2 kp kc) ->
+        let delta d k = bs Delta BS{k,d,t,s,rf,rd,σ=σatm+σbf25} in
         [delta Put  kp === -0.25
         ,delta Call kc ===  0.25]
+
+-- | Traversable cons @T var traversable@
+data T t a = T a (t a)
+  deriving (Show, Functor, Foldable, Traversable)
+data T1 a = T1 a
+  deriving (Show, Functor, Foldable, Traversable)
+data T2 a = T2 a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T3 a = T3 a a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T4 a = T4 a a a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T5 a = T5 a a a a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T6 a = T6 a a a a a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T7 a = T7 a a a a a a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T10 a = T10 a a a a a a a a a a
+  deriving (Show, Functor, Foldable, Traversable)
+data T11 a = T11 a a a a a a a a a a a
+  deriving (Show, Functor, Foldable, Traversable)
 
 iainsTable3_5 :: Fractional a => (String -> a -> a -> b) -> [b]
 iainsTable3_5 f0 =
@@ -666,7 +669,7 @@ atmVol surface rates = flip smile rates . volTableRow surface
 
 volTableRow :: N a => [VolTableRow Tenor a] -> a -> VolTableRow a a
 volTableRow surface = \ t -> case Map.splitLookup t rows of
-  (_, Just r, _) -> r { vtrTenor = t }
+  (_, Just r, _) -> r { Analytic.t = t }
     -- FIXME: interpolate both upper and lower sections with two
     --        crossing step functions to make on-pillar AD Theta
     --        closer to the bump Theta?
@@ -674,24 +677,24 @@ volTableRow surface = \ t -> case Map.splitLookup t rows of
     (Just (t1, r1), Just (t2, r2)) ->
       let i w f = interp t t1 t2 w (f r1) (f r2) in
         VolTableRow
-        { vtrTenor = t
-        , vtrATM  = i "ATM" vtrATM
-        , vtrRR25 = - i "RR25" (abs . vtrRR25)
+        { t = t
+        , σatm  = i "ATM" $ \VolTableRow{σatm} -> σatm
+        , σrr25 = - i "RR25" (\VolTableRow{σrr25} -> abs σrr25)
           -- TODO: it makes no sense to interpolate difference between volatilities
           -- we should first calibrate two smiles, get kATM/P25/C25,
           -- their vols, interpolate strikes and vols
           -- and calibrate new smile.
           -- interpolate like all delta conventions are the same
-        , vtrBF25 = i "BF25" vtrBF25
-        , vtrRR10 = i "RR10" vtrRR10
-        , vtrBF10 = i "BF10" vtrBF10
+        , σbf25 = i "BF25" $ \VolTableRow{σbf25} -> σbf25
+        , σrr10 = i "RR10" $ \VolTableRow{σrr10} -> σrr10
+        , σbf10 = i "BF10" $ \VolTableRow{σbf10} -> σbf10
         }
-    (Just (_,  r1), _            ) -> r1 { vtrTenor = t }
-    (_            , Just (t2, r2)) -> r2 { vtrTenor = t }
+    (Just (_,  r1), _            ) -> r1 { Analytic.t = t }
+    (_            , Just (t2, r2)) -> r2 { Analytic.t = t }
     _ -> error "volTableRow: empty vol surface"
   where
     rows = Map.fromList
-      [(toN (tenorToYear vtrTenor), r) | r@VolTableRow{..} <- surface]
+      [(toN (tenorToYear t), r) | r@VolTableRow{..} <- surface]
     interp t t1 t2 (what::String) v1 v2 =
       -- Iain Clark, p65, Flat forward interpolation
       let v12 = (v2^2*t2 - v1^2*t1) / (t2 - t1) in
@@ -750,12 +753,17 @@ fitTest = R.jacobian' (\ [a,b,c] -> fitSystemThrow [a,b,c] [0.5, 0.5, 0.5] $ \ [
   ,  y - x + z
   ]) [1-0.0001,2,3]
 
+-- | Replace elements of 'Traversable'
+-- @replace t (toList t) = t@
+replace :: Traversable t => [a] -> t b -> t a
+replace l t = S.evalState (mapM (const $ S.state (\ (x:xs) -> (x,xs))) t) l
+
 fitSystemThrow
-  :: N a
-  => [a] -- ^ n inputs
-  -> [a] -- ^ m guesses
-  -> (forall a . N a => [a] -> [a] -> [a]) -- ^ n inputs -> m guesses -> m results
-  -> [a] -- ^ results with derivatives to inputs
+  :: (Traversable i, Traversable r, N a)
+  => i a -- ^ n inputs
+  -> r a -- ^ m guesses
+  -> (forall a . N a => i a -> r a -> [a]) -- ^ n inputs -> m guesses -> me errors
+  -> r a -- ^ results with derivatives to inputs
 fitSystemThrow i g f = either error id $ fitSystem i g f
 
 -- | Solve a system of non-linear equations for a set of inputs.
@@ -769,11 +777,11 @@ fitSystemThrow i g f = either error id $ fitSystem i g f
 -- Can be used to plug a model parameters calibration
 -- (m parameters -> m equations = 0) into an AD framework.
 fitSystem
-  :: N a
-  => [a] -- ^ n inputs
-  -> [a] -- ^ m guesses
-  -> (forall a . N a => [a] -> [a] -> [a]) -- ^ n inputs -> m guesses -> m results
-  -> Either String [a] -- ^ results with derivatives to inputs
+  :: (Traversable i, Functor i, Traversable r, Functor r, N a)
+  => i a -- ^ n inputs
+  -> r a -- ^ m guesses
+  -> (forall a . N a => i a -> r a -> [a]) -- ^ n inputs -> m guesses -> me errors
+  -> Either String (r a) -- ^ results with derivatives to inputs
 fitSystem inputs guesses system0
   | me < m = error $ mconcat ["Can’t fit ", show m, " variables with "
     , show me, " equations"]
@@ -784,13 +792,13 @@ fitSystem inputs guesses system0
     --    (either completely missing out some of the dependencies,
     --    or be off)
     Left $ printf
-      "Didn't converge after %.0f iterations:\n\
-      \  error           %10.3g\n\
-      \%s\
-      \  inputs          %s\n\
-      \  initial guesses %s\n\
-      \  last guesses    %s\n\
-      \  difference      %s"
+      ("Didn't converge after %.0f iterations:\n" <>
+      "  error           %10.3g\n" <>
+      "%s" <>
+      "  inputs          %s\n" <>
+      "  initial guesses %s\n" <>
+      "  last guesses    %s\n" <>
+      "  difference      %s")
     nIterations err
     (unlines $
      zipWith (\ i e -> printf "    %2d %10.7f%%" (i::Int) (e*100))
@@ -800,9 +808,9 @@ fitSystem inputs guesses system0
   | otherwise =
 --   trace (show path) $
 --   map realToFrac results
-  Right $ zipWith
+  Right $ flip replace guesses $ zipWith
     (\ r dis ->
-      realToFrac r + sum (zipWith explicitD (LA.toList dis) inputs))
+      realToFrac r + sum (zipWith explicitD (LA.toList dis) inputsL))
     results (LA.toRows jResultsInputs)
   where
     fmtP (Percent p)
@@ -816,16 +824,17 @@ fitSystem inputs guesses system0
       | length es /= me = error $ "system returned " <> show (length es)
         <> " equations instead of " <> show me
       | otherwise = es
-      where es = system0 is gs
+      where es = system0 (replace is inputs) (replace gs guesses)
     -- Jacobian of results to inputs via the implicit function theorem
     -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
     jResultsInputs = -- trace (show (jr results, guesses, inputsD, results)) $
       (- (LA.inv $ jr results)) <> ji inputsD
-    jr  = matrix m  m . R.jacobian (\ r -> system (map realToFrac inputs) r)
-    jrg = matrix me m . R.jacobian (\ r -> system (map realToFrac inputs) r)
+    jr  = matrix m  m . R.jacobian (\ r -> system (map realToFrac inputsL) r)
+    jrg = matrix me m . R.jacobian (\ r -> system (map realToFrac inputsL) r)
     ji  = matrix m  n . R.jacobian (\ i -> system i (map toN results))
     combine s = foldl1 (zipWith (+))
       $ chunksOf m (s + replicate (m - (me `mod` m)) 0)
+      -- TODO: ^ is this a nonesense? check with curve fitting
     matrix m n = (LA.><) m n . concat -- == LA.fromLists
     (LA.toList -> results, path) =
       nlFitting LevenbergMarquardtScaled
@@ -836,8 +845,9 @@ fitSystem inputs guesses system0
       (\ (LA.toList -> x) -> LA.fromList $ system inputsD x)
       (\ (LA.toList -> x) -> jrg x)
       (LA.fromList guessesD)
-    inputsD = map toD inputs
-    guessesD = map toD guesses
+    inputsL = toList inputs
+    inputsD = map toD inputsL
+    guessesD = map toD $ toList guesses
     m = length guesses
     n = length inputs
 
