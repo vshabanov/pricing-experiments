@@ -14,6 +14,7 @@ executable Test
     Analytic
     Market
     Random
+    Symbolic
     Tenor
     Tridiag
   -- other-extensions:

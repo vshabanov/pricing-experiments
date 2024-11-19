@@ -1,5 +1,5 @@
 {-# LANGUAGE MagicHash, ScopedTypeVariables, CPP #-}
-{-# OPTIONS_GHC -Wno-x-partial -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
+{-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
 
 module Main (module Main) where
 
@@ -53,6 +53,7 @@ import System.IO.Unsafe
 import Text.Printf
 
 import Data.Reflection
+import qualified Numeric.AD as AD
 import qualified Numeric.AD.Mode as AD
 import qualified Numeric.AD.Mode.Reverse as R
 import qualified Numeric.AD.Internal.Reverse as R
@@ -256,6 +257,9 @@ class (NFData a, Show a, Enum a, Ord a, Real a, Erf a) => N a where
   explicitD :: Double -> a -> a
   explicitD _ _ = 0
 
+  partials :: a -> [Double]
+  partials _ = []
+
 width = 0.0001 -- NaN with 0.01, larger error with 0.1 or 1
                 -- but for 'integrated' 0.1 gives good result
 --     width = 0.000001  -- gives 0.00004 = 1 (half pip)
@@ -274,6 +278,7 @@ instance (Reifies s R.Tape, Ord a, Erf a, N a) => N (R.Reverse s a) where
   -- no NaN this way, but error grows for width<0.1, and breaks at 0.0003
 -- 1000 / (exp 1000 + exp (-1000) + 2)
   explicitD d = J.lift1 (const 0) (const $ realToFrac d)
+  partials = map toD . R.partials
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -455,8 +460,8 @@ pv :: Double
 
 jacobianPvGreeks :: (forall a . N a => Market a -> a) -> (Double, [Double])
 jacobianPvGreeks pricer =
-  head $ R.jacobian' (\ xs ->
-    [pricer $ modifyList (zip (map (coerceGet . fst) is) (map const xs)) mkt])
+  R.grad' (\ xs ->
+    pricer $ modifyList (zip (map (coerceGet . fst) is) (map const xs)) mkt)
     (map snd is)
   where
     is = inputs mkt
@@ -501,7 +506,8 @@ instance (Show t, N a) => Show (VolTableRow t a) where
       (show t) (toD σatm) (toD σrr25) (toD σbf25)
       (toD σrr10) (toD σbf10)
 
-g = forM_ [0.01,0.02..2] $ \ t -> do
+g = forM_ [0.5] -- [0.01,0.02..2]
+  $ \ t -> do
   print t
   volSens (\ mkt -> get ImpliedVol mkt (toN t) 1.3)
     `E.catch` \ (e :: E.SomeException) -> print e
@@ -540,6 +546,7 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25,..} rates@Rates{s,rf,rd} =
 --         ,("c1", c1)
 --         ,("c2", c2)
 --         ]]) $
+--  trace (show ("partials", f, c0, partials c0))
   solvedS
   where
     pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ solvedS k * 100) (toD $ s*100)
@@ -599,7 +606,7 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25,..} rates@Rates{s,rf,rd} =
 -- | Traversable cons @T var traversable@
 data T t a = T a (t a)
   deriving (Show, Functor, Foldable, Traversable)
-data T1 a = T1 a
+data T1 a = T1 { unT1 :: a }
   deriving (Show, Functor, Foldable, Traversable)
 data T2 a = T2 a a
   deriving (Show, Functor, Foldable, Traversable)
@@ -659,6 +666,9 @@ polynomialInDeltaExpC0 f t [c0,c1,c2] k =
     fun x = c0 + c1*δ x + c2*δ x^2
     σ0 = exp c0
     δ x = normcdf (x / (σ0 * sqrt t))
+
+-- -- | df(x0..xn-1, t) / dt
+-- deriv :: N a => (forall a . N a => [a] a -> a) -> [a] -> a -> a
 
 infix 4 === -- same as ==
 
@@ -758,6 +768,14 @@ fitTest = R.jacobian' (\ [a,b,c] -> fitSystemThrow [a,b,c] [0.5, 0.5, 0.5] $ \ [
 replace :: Traversable t => [a] -> t b -> t a
 replace l t = S.evalState (mapM (const $ S.state (\ (x:xs) -> (x,xs))) t) l
 
+fitSystemThrow1
+  :: (Traversable i, N a)
+  => i a -- ^ n inputs
+  -> a -- ^ guess
+  -> (forall a . N a => i a -> a -> a) -- ^ n inputs -> guess -> error
+  -> a -- ^ result with derivatives to inputs
+fitSystemThrow1 i g f = unT1 $ fitSystemThrow i (T1 g) (\ i (T1 g) -> [f i g])
+
 fitSystemThrow
   :: (Traversable i, Traversable r, N a)
   => i a -- ^ n inputs
@@ -854,7 +872,7 @@ fitSystem inputs guesses system0
 test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
        , dgda `pct` fdgda, dgdb `pct` fdgdb)
   where
-    [[fdgda, fdgdb]] = R.jacobian (\ as -> fitSystemThrow as [0.5] f) [ia,ib]
+    [fdgda, fdgdb] = R.grad (\ as -> fitSystemThrow1 as 0.5 f) [ia,ib]
     dgda = - (1/dx) * dfda
     dgdb = - (1/dx) * dfdb
     dgdaBump = bumpDiff (\ a -> nx a ib) ia 0.00001
@@ -862,9 +880,9 @@ test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
     Right (x, [dfda, dfdb], dx) = n ia ib
     ia = 1
     ib = 2
-    n a b = newton (\ as x -> head $ f as [x]) [a, b] 0.5
+    n a b = newton (\ as x -> f as x) [a, b] 0.5
     nx a b = let Right (x,_,_) = n a b in x
-    f [a,b] [x] = [a * cos x - b * x^3]
+    f [a,b] x = a * cos x - b * x^3
 
 newton
   :: N a
