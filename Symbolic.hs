@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wincomplete-patterns #-}
 -- | Symbolic differentiation
 module Symbolic
   ( Expr
@@ -9,8 +10,12 @@ module Symbolic
 
 import Data.Number.Erf
 import Data.Ratio
+import Data.Either
 import Data.Maybe
+import Data.List
 import Data.String
+import Data.Map (Map)
+import qualified Data.Map.Strict as Map
 
 data Expr
   = Var VarId
@@ -20,6 +25,7 @@ data Expr
   | NonDiff String -- ^ non-differentiable
   deriving (Eq, Ord)
 
+-- | 'Expr' factored into
 var = Var
 
 type VarId = String
@@ -30,7 +36,7 @@ data BinOp
   | Multiply
   | Divide
   | Expt -- ^ a**b
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord)
 
 data UnOp
   = Negate
@@ -51,7 +57,7 @@ data UnOp
   | ATanh
   | Erf
   | Erfc
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord)
 
 eval :: Erf a => [(VarId, a)] -> Expr -> a
 eval subst = \ case
@@ -127,8 +133,12 @@ diff e v@(Var i) = case e of
       Erfc   -> -2 / sqrt pi * exp (-x^2)
     sec x = 1 / cos x
     sech x = 1 / cosh x
+diff e v = error $ "Please use var to differentiate instead of " <> show v
 
-fixedPoint :: (Expr -> Expr) -> Expr -> Expr
+------------------------------------------------------------------------------
+-- Simplification
+
+fixedPoint :: Eq a => (a -> a) -> a -> a
 fixedPoint f e
   | e' == e   = e
   | otherwise = fixedPoint f e'
@@ -193,19 +203,95 @@ simplify = fixedPoint $ \ e -> case e of
   BinOp Multiply (UnOp Exp a) (UnOp Exp b) -> exp (a+b)
   BinOp Multiply a b | a == b -> BinOp Expt a 2
 
+  BinOp Divide 0 _ -> 0
   BinOp Divide a 1 -> a
+  BinOp Divide a (Const b) -> Const (1/b) * a
   BinOp Divide (BinOp Expt a x) b | a == b -> a ** (x-1)
 
   BinOp Expt a 0 -> 1
   BinOp Expt a 1 -> a
   BinOp Expt (BinOp Expt a b) c -> BinOp Expt a (b+c)
   BinOp Expt (UnOp Exp x) y -> exp (x*y)
+  BinOp Expt (UnOp Sqrt x) 2 -> x
 
   UnOp Negate (UnOp Negate x) -> x
   UnOp Exp 0 -> 1
   UnOp Cos (UnOp Negate x) -> cos x
   UnOp Sin (UnOp Negate x) -> - sin x
   a -> a
+
+data FactoredExpr
+  = FVar VarId
+  | FUnOp UnOp FactoredExpr
+  | FExpr FactoredExpr FactoredExpr
+  | Sum Rational (Map FactoredExpr Rational)
+    -- ^ c0 + expr1*c1 + expr2*c2 ...
+  | Product Rational (Map FactoredExpr Rational)
+    -- ^ c0 * expr1^c1 * expr2^c2 ...
+  | FNonDiff String
+  deriving (Eq, Ord)
+
+fsimp = fixedPoint $ \ case
+  Sum 0 [(e,1)] -> e
+  Sum 0 [(Product c0 e,c)] -> Product (c0*c) e
+  Sum c e -> uncurry Sum $ recurse (foldl' (+) c) sumConst e
+  Product 0 _ -> Product 0 mempty
+  Product 1 [(e,1)] -> e
+  Product c e -> uncurry Product $ recurse (foldl' (*) c) productConst e
+  FExpr a b
+    | Just ca <- toConst a
+    , Just cb <- toConst b
+    , denominator cb == 1 -> Sum (ca ^^ numerator cb) []
+    | otherwise -> FExpr (fsimp a) (fsimp b)
+  FUnOp Negate (Product c es) -> Product (-c) es
+  FUnOp Negate (Sum c es) -> Sum (-c) $ Map.map negate es
+  FUnOp Negate (FUnOp Negate e) -> e
+  FUnOp op e -> FUnOp op (fsimp e)
+  e@FVar{} -> e
+  e@FNonDiff{} -> e
+  where
+    recurse fold getConst es = (fold consts, Map.fromListWith (+) nonConsts)
+      where
+        (consts, nonConsts)
+          = partitionEithers $ concatMap getConst
+          $ filter ((/= 0) . snd)
+          $ Map.toList
+          $ Map.fromListWith (+) [(fsimp e, c) | (e,c) <- Map.toList es]
+    sumConst = \ case
+      (toConst -> Just x, c) -> [Left (x*c)]
+      (Sum c0 es, c) ->
+        Left (c0*c) : [Right (e, ce*c) | (e,ce) <- Map.toList es]
+      e -> [Right e]
+    productConst = \ case
+      (toConst -> Just x, c) | denominator c == 1 -> [Left (x^^numerator c)]
+      (FUnOp Sqrt (toConst -> Just x), 2) -> [Left x]
+      (FUnOp Sqrt (toConst -> Just x), -2) -> [Left (1/x)]
+      (Product c0 es, c) | denominator c == 1 ->
+        Left (c0^^numerator c) : [Right (e, ce*c) | (e,ce) <- Map.toList es]
+      (Product 1 es, c) -> [Right (e, ce*c) | (e,ce) <- Map.toList es]
+      e -> [Right e]
+    toConst = \ case
+      Sum c [] -> Just c
+      Product c [] -> Just c
+      _ -> Nothing
+
+factor = \ case
+  Var i -> FVar i
+  Const c -> Sum c Map.empty
+  BinOp op a b ->
+    let m ca cb = Map.fromListWith (+) [(factor a,ca), (factor b,cb)] in
+    case op of
+      Plus     -> Sum 0 $ m 1 1
+      Minus    -> Sum 0 $ m 1 (-1)
+      Multiply -> Product 1 $ m 1 1
+      Divide   -> Product 1 $ m 1 (-1)
+      Expt
+        | Const y <- b -> expt a y
+        | otherwise    -> FExpr (factor a) (factor b)
+  UnOp op e -> FUnOp op $ factor e
+  NonDiff s -> FNonDiff s
+  where
+    expt x y = Product 1 $ Map.singleton (factor x) y
 
 ------------------------------------------------------------------------------
 -- Instances
@@ -263,10 +349,11 @@ showExpr :: Bool -> Expr -> String
 showExpr root = \ case
   Var n -> n
   Const a
+    | a == toRational pi -> "pi"
     | denominator a == 1 -> show $ numerator a
     | otherwise          -> show a
-  BinOp op a b -> parens [operand a, binOp op, operand b]
-  UnOp op a -> parens [unOp op, showExpr False a]
+  BinOp op a b -> parens [operand a, show op, operand b]
+  UnOp op a -> parens [show op, showExpr False a]
   NonDiff s -> error $ "non-differentiable: " <> s
   where
     isBinOp = \ case
@@ -276,31 +363,65 @@ showExpr root = \ case
     parens (unwords -> x)
       | root = x
       | otherwise = "(" <> x <> ")"
-    binOp = \ case
-      Plus     -> "+"
-      Minus    -> "-"
-      Multiply -> "*"
-      Divide   -> "/"
-      Expt     -> "**"
-    unOp = \ case
-      Negate -> "-"
-      Exp    -> "exp"
-      Log    -> "log"
-      Sqrt   -> "sqrt"
-      Sin    -> "sin"
-      Cos    -> "cos"
-      Tan    -> "tan"
-      ASin   -> "asin"
-      ACos   -> "acos"
-      ATan   -> "atan"
-      Sinh   -> "sinh"
-      Cosh   -> "cosh"
-      Tanh   -> "tanh"
-      ASinh  -> "asinh"
-      ACosh  -> "acosh"
-      ATanh  -> "atanh"
-      Erf    -> "erf"
-      Erfc   -> "erfc"
+
+instance Show BinOp where
+  show = \ case
+    Plus     -> "+"
+    Minus    -> "-"
+    Multiply -> "*"
+    Divide   -> "/"
+    Expt     -> "**"
+
+instance Show UnOp where
+  show = \ case
+    Negate -> "-"
+    Exp    -> "exp"
+    Log    -> "log"
+    Sqrt   -> "sqrt"
+    Sin    -> "sin"
+    Cos    -> "cos"
+    Tan    -> "tan"
+    ASin   -> "asin"
+    ACos   -> "acos"
+    ATan   -> "atan"
+    Sinh   -> "sinh"
+    Cosh   -> "cosh"
+    Tanh   -> "tanh"
+    ASinh  -> "asinh"
+    ACosh  -> "acosh"
+    ATanh  -> "atanh"
+    Erf    -> "erf"
+    Erfc   -> "erfc"
+
+-- deriving instance Show FactoredExpr
+instance Show FactoredExpr where
+  showsPrec d e = (showFExpr (d < 10) e <>)
+
+showFExpr :: Bool -> FactoredExpr -> String
+showFExpr root = \ case
+  FVar n -> n
+  Sum c l ->
+    parens "(Σ " ")" $ intercalate "+" $ showC c : showS (Map.toList l)
+  Product c l ->
+    parens "(Π " ")" $ intercalate "*" $ showC c : showP (Map.toList l)
+  FUnOp op a -> parens "(" ")" $ unwords [show op, showFExpr False a]
+  FNonDiff s -> showExpr root (NonDiff s)
+  FExpr a b -> showFExpr False a <> "**" <> showFExpr False b
+  where
+    showC x = showExpr root (Const x)
+    showS = map $ \ case
+      (e,1) -> showFExpr False e
+      (e,c) -> showC c <> "*" <> showFExpr False e
+    showP = map $ \ case
+      (e,1) -> showFExpr False e
+      (e,c) -> showFExpr False e <> "^" <> showC c
+    isBinOp = \ case
+      BinOp{} -> True
+      _ -> False
+    operand x = showExpr (not $ isBinOp x) x
+    parens o c x
+--      | root = x
+      | otherwise = o <> x <> c
 
 test =
   simplify $ diff (sin x ** cos (x)) x
