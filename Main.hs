@@ -71,6 +71,7 @@ import Tridiag
 import Market
 import Tenor
 import Analytic
+import Symbolic
 
 data Option a
   = Option
@@ -657,6 +658,22 @@ polynomialInDelta f t [c0,c1,c2,c3] k = exp $ fun $ log (f / k)
     σ0 = c3
     δ x = normcdf (x / (σ0 * sqrt t))
     -- normcdf of standartized moneyness
+
+testDiff = writeFile "test.maxima" $ unlines
+  [def "p" p
+  ,def "px" $ fsimplify $ diff p "x"
+  ,def "pxx" $ fsimplify $ diff (diff p "x") "x"
+  ,"mpx:diff(p,x);"
+  ,"mpxx:diff(p,x,2);"
+  ,"is(equal(px,mpx));"
+  ,"is(equal(pxx,mpxx));"
+  ,"subst([x=1,f=1,t=1],mpx);" -- /=0
+  ,"subst([x=1,f=1,t=1],px);"  --  =0
+  ]
+  where
+    def n e = mconcat [n, ":", toMaxima e, ";"]
+    p = polynomialInDeltaExpC0 "f" "t" ["c0","c1","c2"] "x"
+
 
 polynomialInDeltaExpC0 f t [c0,c1,c2] k =
 --  c0 + c1*(f/k) + c2*(f/k)^2

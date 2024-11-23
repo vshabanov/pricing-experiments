@@ -37,6 +37,7 @@ executable Test
     hmatrix-gsl,
     mtl >= 2.3.1,
     mwc-random,
+    parsec >= 3.1.17.0,
     pretty-show >= 1.10,
     process >= 1.6.18.0,
     random >= 1.2.0,
