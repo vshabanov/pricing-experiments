@@ -7,17 +7,7 @@ maintainer:          dev@vshabanov.com
 build-type:          Simple
 extra-source-files:  CHANGELOG.md
 
-executable Test
-  main-is:
-    Main.hs
-  other-modules:
-    Analytic
-    Market
-    Random
-    Symbolic
-    Tenor
-    Tridiag
-  -- other-extensions:
+common common
   build-depends:
     QuickCheck >= 2.14.2,
     ad,
@@ -57,3 +47,22 @@ executable Test
     OverloadedStrings
     RecordWildCards
     ViewPatterns
+  -- other-extensions:
+
+executable Test
+  import: common
+  main-is:
+    Main.hs
+  other-modules:
+    Analytic
+    Market
+    Random
+    Symbolic
+    Tenor
+    Tridiag
+
+test-suite test-symbolic
+  import: common
+  type:    exitcode-stdio-1.0
+  main-is: Symbolic.hs
+  ghc-options: -main-is Symbolic.testSymbolic

@@ -661,8 +661,8 @@ polynomialInDelta f t [c0,c1,c2,c3] k = exp $ fun $ log (f / k)
 
 testDiff = writeFile "test.maxima" $ unlines
   [def "p" p
-  ,def "px" $ fsimplify $ diff p "x"
-  ,def "pxx" $ fsimplify $ diff (diff p "x") "x"
+  ,def "px" $ simplify $ diff p "x"
+  ,def "pxx" $ simplify $ diff (diff p "x") "x"
   ,"mpx:diff(p,x);"
   ,"mpxx:diff(p,x,2);"
   ,"is(equal(px,mpx));"
