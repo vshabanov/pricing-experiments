@@ -75,7 +75,6 @@ data RatesT a
     }
   deriving (Show, Functor, Foldable, Traversable)
 
-
 forwardRate :: Floating a => Rates a -> a -> a
 forwardRate Rates{s,rf,rd} t = s * exp ((rd-rf)*t)
 

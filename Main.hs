@@ -72,6 +72,7 @@ import Market
 import Tenor
 import Analytic
 import Symbolic
+import N
 
 data Option a
   = Option
@@ -230,56 +231,6 @@ digiOptionPv o market spotAt =
 
 combine a b market what = a market what + b market what
 scale s f market what = s * f market what
-
-
-toD :: N a => a -> Double
-toD = realToFrac
-
-toN :: N a => Double -> a
-toN = realToFrac
-
-instance NFData (R.Reverse s a) where
-  rnf a = seq a ()
-
--- | extended Num functions
-class (NFData a, Show a, Enum a, Ord a, Real a, Erf a) => N a where
-  step :: a -> a
---   step = (\x -> if x > 0 then 1 else 0)
-  step x = 1 / (1 + exp (-k*x))
---   step x = k*x / sqrt (1+(k*x)^2) / 2 + 0.5 -- w=0.3 still bad
--- step x = if x > 0 then 1 else 0 -- по-сути, обнуляет производные
--- step x = if x > 0 then 1 else 0
--- step :: (R.Jacobian t, Ord (AD.Scalar t)) => t -> t
--- step x = R.lift1 (\ x -> if x > 0 then 1 else 0) (const 0) x
--- step x = (x + abs x) / (2*x)
--- step x = R.diff (max 0) x -- derivative of the ramp function
-
-  -- | Specify an explicit derivative to a variable
-  explicitD :: Double -> a -> a
-  explicitD _ _ = 0
-
-  partials :: a -> [Double]
-  partials _ = []
-
-width = 0.0001 -- NaN with 0.01, larger error with 0.1 or 1
-                -- but for 'integrated' 0.1 gives good result
---     width = 0.000001  -- gives 0.00004 = 1 (half pip)
-                      --      -0.00004 ~ 4e-18
-    -- k=10 дает плавный переход от -0.5 до 0.5?
-k, width :: Erf a => a
-k = 1/width -- steepness
-
-instance N Double
-instance (Reifies s R.Tape, Ord a, Erf a, N a) => N (R.Reverse s a) where
-  step = J.lift1 step
-  -- Dirac delta is not much better
---     (\ x -> 1 / realToFrac (abs a * sqrt pi) * exp (-(x / realToFrac a)^2))
---     where a = 0.1 -- lower values lead to bigger error until it breaks at ~0.001
-    (\ x -> k / (exp (k*x) + exp (-k*x) + 2))
-  -- no NaN this way, but error grows for width<0.1, and breaks at 0.0003
--- 1000 / (exp 1000 + exp (-1000) + 2)
-  explicitD d = J.lift1 (const 0) (const $ realToFrac d)
-  partials = map toD . R.partials
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -521,7 +472,7 @@ volSens f = putStrLn $ unlines
   ]
 
 smile :: N a => VolTableRow a a -> Rates a -> a -> a
-smile v@VolTableRow{t,σatm,σbf25,σrr25,..} rates@Rates{s,rf,rd} =
+smile v@VolTableRow{t,σatm,σbf25,σrr25} rates@Rates{s,rf,rd} =
 --   trace (unlines $
 --       [ printf "%-12s %.8f  %.5f%%" n (toD k) (toD $ solvedS k * 100)
 --       | (n::String,k) <-
@@ -659,20 +610,25 @@ polynomialInDelta f t [c0,c1,c2,c3] k = exp $ fun $ log (f / k)
     δ x = normcdf (x / (σ0 * sqrt t))
     -- normcdf of standartized moneyness
 
-testDiff = writeFile "test.maxima" $ unlines
-  [def "p" p
-  ,def "px" $ simplify $ diff p "x"
-  ,def "pxx" $ simplify $ diff (diff p "x") "x"
-  ,"mpx:diff(p,x);"
-  ,"mpxx:diff(p,x,2);"
-  ,"is(equal(px,mpx));"
-  ,"is(equal(pxx,mpxx));"
-  ,"subst([x=1,f=1,t=1],mpx);" -- /=0
-  ,"subst([x=1,f=1,t=1],px);"  --  =0
-  ]
+testDiff = writeFile "test.maxima" $ unlines $
+  [def "p" p]
+  <>
+  foldMap (\ v ->
+    [def ("p"<>v)      $ simplify $       diff p (var v)
+    ,def ("p"<>v<>"2") $ simplify $ diff (diff p (var v)) (var v)
+    ,printf "mp%s:diff(p,%s)$" v v
+    ,printf "mp%s2:diff(p,%s,2)$" v v
+    ,printf "print(\"d%s  is the same: \", is(equal(p%s,mp%s)));" v v v
+    ,printf "print(\"d%s2 is the same: \", is(equal(p%s2,mp%s2)));" v v v
+    ])
+    ["x", "f", "t", "c0", "c1", "c2", "x"]
+--   <>
+--   ["subst([x=1,f=1,t=1],mpx);" -- /=0
+--   ,"subst([x=1,f=1,t=1],px);"  --  =0
+--   ]
   where
-    def n e = mconcat [n, ":", toMaxima e, ";"]
-    p = polynomialInDeltaExpC0 "f" "t" ["c0","c1","c2"] "x"
+    def n e = mconcat [n, ":", toMaxima e, "$"]
+    p = polynomialInDeltaExpC0 "f" "t" ["c0","c1","c2"] "x" :: Expr ()
 
 
 polynomialInDeltaExpC0 f t [c0,c1,c2] k =

@@ -56,6 +56,7 @@ executable Test
   other-modules:
     Analytic
     Market
+    N
     Random
     Symbolic
     Tenor
@@ -65,4 +66,6 @@ test-suite test-symbolic
   import: common
   type:    exitcode-stdio-1.0
   main-is: Symbolic.hs
+  other-modules:
+    N
   ghc-options: -main-is Symbolic.testSymbolic

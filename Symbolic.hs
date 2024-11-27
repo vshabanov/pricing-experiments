@@ -3,7 +3,10 @@
 -- | Symbolic differentiation
 module Symbolic
   ( Expr
+  , VarId
   , var
+  , tag
+  , lift
   , eval
   , diff
   , simplify
@@ -17,6 +20,7 @@ import System.Exit
 import Data.Number.Erf
 import Data.Ord
 import Data.Ratio
+import Data.Array
 import Data.Bifunctor
 import Data.Either
 import Data.Maybe
@@ -24,6 +28,7 @@ import Data.List
 import Data.String
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import qualified Control.Monad.State.Strict as S
 
 import Control.Applicative ((<|>))
 import Text.Parsec ((<?>))
@@ -33,18 +38,30 @@ import qualified Text.Parsec.Token as P
 import qualified Text.Parsec.Language as P
 
 import Test.QuickCheck
+import N
 
-data Expr
+data Expr a
   = Var VarId
+    -- | Same as 'Var' but doesn't require lookup in 'eval'.
+    -- It should simplify the connection of 'Expr' with AD variables.
+    -- No need to invent variable names and maintain name-value mappings.
+    -- We can then differentiate subexpressions symbolically while keeping
+    -- AD value to have sensitivies to market inputs from the end results.
+  | EmbeddedVar a
+    -- | Named sub-expression that we can differentiate on.
+    -- It can keep AD variables beneath.
+  | Tag VarId (Expr a)
   | Const Rational
   | Pi
-  | BinOp BinOp Expr Expr
-  | UnOp UnOp Expr
-  | NonDiff String -- ^ non-differentiable
+  | BinOp BinOp (Expr a) (Expr a)
+  | UnOp UnOp (Expr a)
+    -- | Non-differentiable
+  | NonDiff String
   deriving (Eq, Ord)
 
--- | 'Expr' factored into
 var = Var
+tag = Tag
+lift = EmbeddedVar
 
 type VarId = String
 
@@ -82,11 +99,11 @@ data UnOp
   | Erfc
   deriving (Eq, Ord, Enum, Bounded, Show)
 
-eval :: Erf a => (VarId -> a) -> Expr -> a
+eval :: Erf a => (VarId -> a) -> Expr a -> a
 eval subst = \ case
   Var id -> subst id
---     fromMaybe (error $ "variable " <> id <> " not found")
---     $ lookup id subst
+  EmbeddedVar a -> a
+  Tag _ x -> e x
   Const a -> fromRational a
   Pi -> pi
   BinOp op a b -> binOp op (e a) (e b)
@@ -124,18 +141,37 @@ unOp = \ case
   Erf    -> erf
   Erfc   -> erfc
 
-diff :: Expr -> Expr -> Expr
-diff e v@(Var i) = case e of
+diff :: Show a => Expr a -> Expr a -> Expr a
+diff e v =
+  -- always use 'simplify' as we get a lot of 0s, and we might have
+  -- an invalid computation multiplied by 0 and get NaN where we shouldn't.
+  -- E.g.:
+  --   (- x) ** 1
+  -- gives
+  --   (- x) ** 1 * (log (- x) * 0 + 1 * (- 1) * 1 / (- x))
+  -- where log (-1) is NaN but it's multiplied by 0 and not used in
+  -- final computation
+  simplify $ diffVar e $ case v of
+    Var i   -> i
+    Tag i _ -> i
+    v -> error $ "Please use 'var' to differentiate instead of " <> show v
+
+diffVar :: Expr a -> VarId -> Expr a
+diffVar e i = case e of
   Var vi
     | vi == i   -> 1
     | otherwise -> 0
-  Const a -> 0
+  EmbeddedVar _ -> 0
+  Tag vi e
+    | vi == i   -> 1
+    | otherwise -> d e
+  Const _ -> 0
   Pi -> 0
   BinOp op a b -> binOp op a b
   UnOp op a -> dUnOp op a * d a
   NonDiff s -> error $ "non-differentiable: " <> s
   where
-    d x = diff x v
+    d x = diffVar x i
     binOp op a b = case op of
       Plus     -> d a + d b
       Minus    -> d a - d b
@@ -148,9 +184,9 @@ diff e v@(Var i) = case e of
       Log    -> 1 / x
       Sqrt   -> 1 / (2 * sqrt x)
       Sin    -> cos x
-      Cos    -> - sin x
+      Cos    -> -sin x
       Tan    -> sec x ^ 2
-      ASin   -> 1 / sqrt (1 - x^2)
+      ASin   ->  1 / sqrt (1 - x^2)
       ACos   -> -1 / sqrt (1 - x^2)
       ATan   -> 1 / (x^2 + 1)
       Sinh   -> cosh x
@@ -163,12 +199,14 @@ diff e v@(Var i) = case e of
       Erfc   -> -2 / sqrt pi * exp (-x^2)
     sec x = 1 / cos x
     sech x = 1 / cosh x
-diff e v = error $ "Please use var to differentiate instead of " <> show v
 
 ------------------------------------------------------------------------------
 -- Simplification
 
-simplify = feval Var . fsimp . factor
+simplify :: Expr a -> Expr a
+simplify e = feval Var (EmbeddedVar . (evars!)) Tag $ fsimp fe
+  where
+    (fe, evars) = factor e
 
 fixedPoint :: Eq a => (a -> a) -> a -> a
 fixedPoint f e
@@ -179,6 +217,8 @@ fixedPoint f e
 
 data FExpr
   = FVar VarId
+  | FEmbeddedVar Int
+  | FTag VarId FExpr
   | FUnOp UnOp FExpr
   | FExpt FExpr FExpr
   | FSum Rational (Map FExpr Rational)
@@ -213,6 +253,8 @@ fsimp = fixedPoint $ \ case
   FUnOp Sin (FUnOp Negate x) -> FUnOp Negate (FUnOp Sin x)
   FUnOp op e -> FUnOp op (fsimp e)
   e@FVar{} -> e
+  e@FEmbeddedVar{} -> e
+  FTag i e -> FTag i (fsimp e)
   e@FNonDiff{} -> e
   e@FPi -> e
   where
@@ -245,7 +287,9 @@ fsimp = fixedPoint $ \ case
       (FUnOp Sqrt (toConst -> Just x), -2) | x > 0  -> [Left (1/x)]
       (FUnOp Sqrt FPi,  2) -> [Right (FPi, 1)]
       (FUnOp Sqrt FPi, -2) -> [Right (FPi,-1)]
-      (FUnOp Negate x, 1) -> [Left (-1), Right (x,1)]
+      (FUnOp Negate x, c)
+        | odd c -> [Left (-1), Right (x,c)]
+        | otherwise -> [Right (x,c)]
       (FSum 0 [(x,sc)], c) ->
         [Left (sc^^c), Right (x,c)]
       (FProduct c0 es, c) ->
@@ -256,8 +300,14 @@ fsimp = fixedPoint $ \ case
       FProduct c [] -> Just c
       _ -> Nothing
 
-feval :: Erf a => (VarId -> a) -> FExpr -> a
-feval v = \ case
+feval
+  :: Erf a
+  => (VarId -> a) -- ^ 'FVar' to 'Var'
+  -> (Int -> a)   -- ^ 'FEmbeddedVar' to 'EmbeddedVar'
+  -> (VarId -> a -> a)  -- ^ 'FTag' to 'Tag'
+  -> FExpr
+  -> a
+feval var embeddedVar tag = \ case
   FSum c0 ss -> case negativeLast ss of
     [] -> r c0
     (x:xs) -> mkSum c0 x xs
@@ -266,13 +316,15 @@ feval v = \ case
     (x:xs) -> goProd (firstProd c0 x) xs
   FExpt a b -> e a ** e b
   FUnOp op x -> unOp op $ e x
-  FVar i -> v i
+  FVar i -> var i
+  FEmbeddedVar i -> embeddedVar i
+  FTag i x -> tag i (e x)
   FPi -> pi
   FNonDiff s -> eval (error "var in NonDiff?") (NonDiff s)
   where
     -- put negative constants last to have more a-b and a/b
     -- instead of -1*b+a and 1/b*a
-    negativeLast x = map (first $ feval v)
+    negativeLast x = map (first e)
       $ sortBy (comparing $ \ (e,c) -> (Down $ signum c, e)) $ Map.toList x
     -- replace 1/a*b*1/c with b/a/c
     firstProd 1  (e,c) = e ^^ c
@@ -298,32 +350,46 @@ feval v = \ case
 
     r :: Fractional a => Rational -> a
     r = fromRational
-    e = feval v
+    e = feval var embeddedVar tag
 
-factor = \ case
-  Var i -> FVar i
-  Const c -> FSum c Map.empty
-  Pi -> FPi
-  BinOp op a b ->
-    let m ca cb = Map.fromListWith (+) [(factor a,ca), (factor b,cb)] in
-    case op of
-      Plus     -> FSum 0 $ m 1 1
-      Minus    -> FSum 0 $ m 1 (-1)
-      Multiply -> FProduct 1 $ m 1 1
-      Divide   -> FProduct 1 $ m 1 (-1)
-      Expt     -> FExpt (factor a) (factor b)
-  UnOp op e -> FUnOp op $ factor e
-  NonDiff s -> FNonDiff s
+factor :: Expr a -> (FExpr, Array Int a)
+factor e = (fe, listArray (0,n-1) $ reverse embeddedVars)
   where
-    expt x y = FProduct 1 $ Map.singleton (factor x) y
+    (fe, (n, embeddedVars)) = S.runState (factorS e) (0, [])
+
+factorS :: Expr a -> S.State (Int, [a]) FExpr
+factorS = \ case
+  Var i -> p $ FVar i
+  EmbeddedVar e -> do
+    (n, vs) <- S.get
+    S.put (n+1, e:vs)
+    p $ FEmbeddedVar n
+  Tag i e -> FTag i <$> factorS e
+  Const c -> p $ FSum c Map.empty
+  Pi -> p FPi
+  BinOp op a b -> do
+    let m ca cb = do
+          fa <- factorS a
+          fb <- factorS b
+          p $ Map.fromListWith (+) [(fa,ca), (fb,cb)]
+    case op of
+      Plus     -> FSum 0 <$> m 1 1
+      Minus    -> FSum 0 <$> m 1 (-1)
+      Multiply -> FProduct 1 <$> m 1 1
+      Divide   -> FProduct 1 <$> m 1 (-1)
+      Expt     -> liftM2 FExpt (factorS a) (factorS b)
+  UnOp op e -> FUnOp op <$> factorS e
+  NonDiff s -> p $ FNonDiff s
+  where
+    p = pure
 
 ------------------------------------------------------------------------------
 -- Instances
 
-instance IsString Expr where
+instance IsString (Expr a) where
   fromString = parseExpr
 
-instance Num Expr where
+instance Num (Expr a) where
   a + b = BinOp Plus a b
   a - b = BinOp Minus a b
   a * b = BinOp Multiply a b
@@ -335,12 +401,12 @@ instance Num Expr where
 
   fromInteger = Const . fromInteger
 
-instance Fractional Expr where
+instance Fractional (Expr a) where
   a / b = BinOp Divide a b
 
   fromRational = Const
 
-instance Floating Expr where
+instance Floating (Expr a) where
   pi    = Pi
   exp   = UnOp Exp
   log   = UnOp Log
@@ -368,7 +434,7 @@ instance Floating Expr where
 --     log1pexp x = log1p (exp x)
 --     log1mexp x = log1p (negate (exp x))
 
-instance Erf Expr where
+instance Erf (Expr a) where
   erf  = UnOp Erf
   erfc = UnOp Erfc
 
@@ -380,19 +446,29 @@ data ShowExprMode
   | SEM_Maxima  -- ^ suitable for copy-pasting into Maxima
   deriving (Eq, Show)
 
-instance Show Expr where
+instance Show a => Show (Expr a) where
   showsPrec d e = (showExpr SEM_Haskell (False, P.AssocNone, d) e <>)
 
+toMaxima :: Show a => Expr a -> String
 toMaxima = filter (/= ' ') . showExpr SEM_Maxima (False, P.AssocNone, 0)
 
-showExpr :: ShowExprMode -> (Bool, P.Assoc, Int) -> Expr -> String
-showExpr m (pNegate, pa, pp) = \ case
+showExpr :: Show a => ShowExprMode -> (Bool, P.Assoc, Int) -> Expr a -> String
+showExpr m p@(pNegate, pa, pp) = \ case
   Var n -> parensIf argParens [n]
+  EmbeddedVar e -> parensIf argParens [show e]
+  Tag n e ->
+    if m == SEM_Maxima then
+      showExpr m p e
+    else
+      let (a, p) = (P.AssocRight, 0)
+      in
+        parensIf (p < pp || (p == pp && diffAssoc a pa))
+        [n,"@",showExpr m (False,a,p) e]
   Const a
     | n <- numerator a
     , d <- denominator a
     -> if d == 1 then parensIf (n < 0 || argParens) [show n]
-       else showExpr m (False,pa,pp) (fromInteger n / fromInteger d)
+       else showExpr m (False,pa,pp) (fromInteger n / fromInteger d :: Expr ())
        -- show like a division -1%2 -> (-1)/2, not (-1/2) as the second
        -- one will be parsed as a division and not as a rational constant
   Pi -> parensIf argParens [if m == SEM_Maxima then "%pi" else "pi"]
@@ -418,9 +494,11 @@ showExpr m (pNegate, pa, pp) = \ case
       | needParens = "(" <> x <> ")"
       | otherwise  = x
 
-debugShowExpr :: Expr -> String
+debugShowExpr :: Show a => Expr a -> String
 debugShowExpr = \ case
   Var n -> "Var " <> show n
+  EmbeddedVar v -> "EmbeddedVar " <> show v
+  Tag t e -> mconcat ["Tag ", show t, " (", show e, ")"]
   Const a -> mconcat ["Const (", show a, ")"]
   Pi -> "Pi"
   BinOp op a b -> unwords ["BinOp", show op, go a, go b]
@@ -462,16 +540,18 @@ instance Show FExpr where
 showFExpr :: Bool -> FExpr -> String
 showFExpr root = \ case
   FVar n -> n
+  FEmbeddedVar i -> "EV" <> show i
+  FTag n e -> n<>"@"<>showFExpr False e
   FSum c l ->
     parens "(Σ " ")" $ intercalate "+" $ showC c : showS (Map.toList l)
   FProduct c l ->
     parens "(Π " ")" $ intercalate "*" $ showC c : showP (Map.toList l)
   FUnOp op a -> parens "(" ")" $ unwords [show op, showFExpr False a]
-  FNonDiff s -> show (NonDiff s)
+  FNonDiff s -> show (NonDiff s :: Expr ())
   FExpt a b -> showFExpr False a <> "**" <> showFExpr False b
   FPi -> "pi"
   where
-    showC x = show (Const x)
+    showC x = show (Const x :: Expr ())
     showS = map $ \ case
       (e,1) -> showFExpr False e
       (e,c) -> showC c <> "*" <> showFExpr False e
@@ -519,22 +599,22 @@ parseExpr s = either (error . show) id $ P.parse (expr <* P.eof) s s
       <> binops
 
     binops =
-      reverse $ Map.elems $ Map.fromListWith (<>)
+      reverse $ Map.elems $ Map.fromListWith (<>) $
       [ (prio, [binary (showBinOp op) (BinOp op) assoc])
       | op <- [minBound..maxBound]
       , let (assoc, _, _, prio) = fixity op ]
+      <>
+      [ (0, [binary "@" tag P.AssocRight]) ]
+    tag (Var i) e = Tag i e
+    tag v _ = error "Expected tag name before '@'"
 
     binary name fun assoc = P.Infix  (fun <$ reservedOp name) assoc
     prefix name fun       = P.Prefix (fun <$ reservedOp name)
 
     P.TokenParser{parens, identifier, naturalOrFloat, reservedOp, integer, decimal, lexeme}
       = P.makeTokenParser P.emptyDef
-        { P.reservedOpNames = "pi" : map show [minBound..maxBound :: BinOp] }
-
-test =
-  simplify $ diff (sin x ** cos (x)) x
-x = Var "x"
-
+        { P.reservedOpNames =
+            "pi" : "@" : map show [minBound..maxBound :: BinOp] }
 
 ------------------------------------------------------------------------------
 -- Tests
@@ -544,20 +624,23 @@ testSymbolic = do
   unless (isSuccess r) exitFailure
 
 quickCheckBig p = quickCheckWith (stdArgs{maxSuccess=10000}) p
+
 instance Arbitrary UnOp where
   arbitrary = chooseEnum (minBound, maxBound)
 instance Arbitrary BinOp where
   arbitrary = chooseEnum (minBound, maxBound)
-instance Arbitrary Expr where
+instance Arbitrary (Expr Double) where
   arbitrary = genExpr testVars
 
+testVars :: Floating a => [(VarId, a)]
 testVars = [("a",1),("b",-1.5),("c",pi),("x",exp 1)]
-testEval = eval (\ v -> fromJust $ lookup v testVars)
-substTest = eval (\ v -> Const $ toRational $ fromJust $ lookup v testVars)
+testEval x = eval (\ v -> fromJust $ lookup v testVars) x
+substTest x = eval (\ v -> Const $ toRational $ fromJust $ lookup v testVars) x
 
-genExpr :: [(String, Double)] -> Gen Expr
+genExpr :: [(String, Double)] -> Gen (Expr Double)
 genExpr vars = filterGen goodTestExpr $ oneof
   [Var <$> elements (map fst vars)
+  ,EmbeddedVar <$> arbitrary
   ,Const <$> arbitrary
   ,pure Pi
   ,BinOp <$> arbitrary <*> genExpr vars <*> genExpr vars
@@ -569,7 +652,7 @@ filterGen pred gen = do
   r <- gen
   if pred r then pure r else filterGen pred gen
 
-goodTestExpr :: Expr -> Bool
+goodTestExpr :: Expr Double -> Bool
 goodTestExpr expr = ok (e expr) && case expr of
   BinOp Expt _ (Const b) -> abs b < 1e3
   BinOp Expt _ b -> abs (e b) < 1e3
@@ -583,23 +666,25 @@ goodTestExpr expr = ok (e expr) && case expr of
       -- when pi is on the level of floating point jitter
       -- so we cut the range here
       abs (e x) < 1e3
-    | otherwise -> all (ok . unOp op . (e x +)) ([eps, -eps] :: [Double])
+    | otherwise -> all (ok . unOp op . (e x +)) (l [eps, -eps])
       -- jitter can lead us out of the function domain
       -- 'tanh 0.99999' can be fine but 'tanh 1' is not
   _ -> True
   where
-    e = testEval :: Expr -> Double
+    l :: [a] -> [a]
+    l = id
+    e x = testEval x
     eps = 1e-5
     ok x = not $ isNaN x || isInfinite x || abs x > 1e5 || abs x < eps
 
-newtype TestDiffExpr = TestDiffExpr Expr
+newtype TestDiffExpr = TestDiffExpr (Expr Double)
 instance Show TestDiffExpr where show (TestDiffExpr e) = show e
 instance IsString TestDiffExpr where fromString = TestDiffExpr . fromString
 
 instance Arbitrary TestDiffExpr where
   arbitrary = TestDiffExpr <$> filterGen goodDiffExpr arbitrary
 
--- | Can we get a more or less stable numerical derivative
+-- | Can we get a more or less stable numerical derivative?
 goodDiffExpr e =
   abs (numDiff e) > 1e-3 && abs (numDiff e) < 1e5
   && eq_eps 1e-4 (numDiff' defaultBump e) (numDiff' (defaultBump*10) e)
@@ -622,18 +707,18 @@ prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
       ,show ds
       ,"numeric  = " <> show n
       ,"symbolic = " <> show s]
-    d = diff e "x"
+    d = diffVar e "x"
     ds = simplify d
     n = numDiff e
     s = testEval ds
 
-prop_parse :: Expr -> Bool
+prop_parse :: Expr () -> Bool
 prop_parse x = e == parseExpr (show e)
   where
     -- need to 'show' first to normalize associativity,
     -- otherwise 'a*(b*c)*d' will not roundtrip as it will be showed
     -- as 'a*b*c*d'
-    e = parseExpr (show x)
+    e = parseExpr (show x) :: Expr ()
 
 prop_simplify x = counterexample debug $ eq_eps 1e-6 l r
   where
