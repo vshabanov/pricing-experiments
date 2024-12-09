@@ -204,7 +204,7 @@ eps a b = abs (a-b) / max (abs a) (abs b)
 
 -- https://hackage.haskell.org/package/quantfin-0.2.0.0/docs/src/Quant-Math-Utilities.html#tdmaSolver
 -- | Tridiagonal matrix solver.  Pretty simple.
-tdmaSolver :: (Fractional a, Ord a) => [a] -> [a] -> [a] -> [a] -> [a]
+tdmaSolver :: Fractional a => [a] -> [a] -> [a] -> [a] -> [a]
 tdmaSolver aL bL cL dL = V.toList $
     let [a,b,c,d] = map V.fromList [aL,bL,cL,dL] in
         runST $ do

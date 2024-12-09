@@ -22,6 +22,7 @@ module Market
     Market
   , Get(..)
   , VolInput(..)
+  , Smile(..), impliedVol, localVol -- TODO: separate the market and inputs
     -- * Building a new market
   , buildMarket, input, node, Recipe, Node
     -- * Changing inputs
@@ -53,7 +54,17 @@ data Get n a where
   PricingDate :: Get a a
 
   -- nodes
-  ImpliedVol :: Get a (a -> a -> a) -- ^ time -> strike -> implied vol
+  Smile :: Get a (a -> Smile a) -- ^ time -> smile
+
+data Smile a
+  = Smile_
+    { smileImpliedVol :: a -> a -- ^ strike -> implied vol
+    , smileLocalVol   :: a -> a -- ^ strike -> local vol
+    }
+
+impliedVol mkt τ k = smileImpliedVol (get Smile mkt τ) k
+localVol   mkt τ k = smileLocalVol   (get Smile mkt τ) k
+
 
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)
@@ -160,4 +171,4 @@ mkt = buildMarket $ do
   input RateDom 0.1
   v1d <- input (Vol "1D" ATMVol) 0.1
   v1y <- input (Vol "1Y" ATMVol) 0.2
-  node ImpliedVol $ (\ v1 v2 t k -> v1*v2*t) <$> v1d <*> v1y
+  node Smile $ (\ v1 v2 t -> Smile_ (*(v1*v2*t)) (*t)) <$> v1d <*> v1y

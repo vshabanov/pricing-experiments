@@ -20,6 +20,7 @@ common common
     criterion,
     deepseq >= 1.5.0.0,
     erf,
+    free,
     ghc-bignum >= 1.3,
     ghc-prim >= 0.11.0,
     gnuplot,
@@ -48,6 +49,9 @@ common common
     RecordWildCards
     ViewPatterns
   -- other-extensions:
+  hs-source-dirs:
+    src
+  ghc-options: -rtsopts -with-rtsopts "-M3G"
 
 executable Test
   import: common
@@ -56,9 +60,10 @@ executable Test
   other-modules:
     Analytic
     Market
-    N
+    Number
     Random
     Symbolic
+    Symbolic.Matrix
     Tenor
     Tridiag
 
@@ -67,5 +72,5 @@ test-suite test-symbolic
   type:    exitcode-stdio-1.0
   main-is: Symbolic.hs
   other-modules:
-    N
+    Number
   ghc-options: -main-is Symbolic.testSymbolic
