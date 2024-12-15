@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedLists, DeriveAnyClass, TemplateHaskell #-}
+{-# LANGUAGE OverloadedLists, DeriveAnyClass, TemplateHaskell, MultiWayIf #-}
 {-# OPTIONS_GHC -Wincomplete-patterns #-}
 -- | Symbolic differentiation
 module Symbolic
@@ -14,6 +14,8 @@ module Symbolic
   , toMaxima
 
   , testSymbolic
+  , showExprWithSharing
+  , cse
   ) where
 
 import Control.Monad
@@ -29,6 +31,9 @@ import Data.List
 import Data.String
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import Data.IntMap (IntMap)
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.IntSet as IntSet
 
 import Control.Applicative ((<|>))
 import Text.Parsec ((<?>))
@@ -44,6 +49,10 @@ import Control.DeepSeq
 import GHC.Generics (Generic)
 import Debug.Trace
 
+import System.IO.Unsafe (unsafePerformIO)
+import Data.IORef
+import qualified Control.Monad.State.Strict as S
+
 test = do
   fix $ \ loop -> do
     l <- getLine
@@ -57,24 +66,24 @@ If 'a' is an AD value, symbolically differentiated 'Expr' will have
 correct sensitivities to market inputs.
 -}
 data Expr a
-  = Var VarId
+  = Var !I VarId
     -- | Named sub-expression that we can differentiate on.
     -- It can keep AD variables beneath.
-  | Tag VarId (Expr a)
+  | Tag !I VarId (Expr a)
     -- | Lifted AD value.
   | Const a
-  | BinOp BinOp (Expr a) (Expr a)
-  | UnOp UnOp (Expr a)
-    -- | Non-differentiable
-  | NonDiff String
+  | BinOp !I BinOp (Expr a) (Expr a)
+  | UnOp !I UnOp (Expr a)
   deriving (Generic, NFData)
 
-var = Var
-tag = Tag
+var x = unsafePerformIO $ newId >>= \ i -> pure $ Var i x
+tag t e = unsafePerformIO $ newId >>= \ i -> pure $ Tag i t e
 lift = Const
 unlift e = unsafeEval "unlift" e
 
 type VarId = String
+-- | Unique subexpression id to help with sharing
+type I = Int
 
 data BinOp
   = Plus
@@ -82,7 +91,6 @@ data BinOp
   | Multiply
   | Divide
   | Expt -- ^ a**b
-  | ExplicitD -- ^ Explicit derivative to be used instead of an expression
 --   | LogBase -- ^ logBase
   deriving (Eq, Ord, Enum, Bounded, Show, Generic, NFData)
 
@@ -115,15 +123,16 @@ data UnOp
   deriving (Eq, Ord, Enum, Bounded, Show, Generic, NFData)
 
 eval :: N a => (VarId -> a) -> Expr a -> a
-eval subst = \ case
-  Var id -> subst id
-  Tag _ x -> e x
-  Const a -> a
-  BinOp op a b -> binOp op (e a) (e b)
-  UnOp op a -> unOp op (e a)
-  NonDiff s -> error $ "non-differentiable: " <> s
-  where
-    e = eval subst
+eval subst expr = unsafePerformIO $ do
+  m <- newUnsafeMemoMap
+  let
+    e = \ case
+      Var i id -> m i $ subst id
+      Tag i _ x -> m i $ e x
+      Const a -> a
+      BinOp i op a b -> m i $ binOp op (e a) (e b)
+      UnOp i op a -> m i $ unOp op (e a)
+  pure $ e expr
 
 binOp :: N a => BinOp -> (a -> a -> a)
 binOp = \ case
@@ -132,7 +141,6 @@ binOp = \ case
   Multiply  -> (*)
   Divide    -> (/)
   Expt      -> (**)
-  ExplicitD -> error "ExplicitD" -- explicitD
 
 unOp :: N a => UnOp -> (a -> a)
 unOp = \ case
@@ -173,35 +181,35 @@ diff e v =
   -- final computation
   -- simplify $
   diffVar e $ case v of
-    Var i   -> i
-    Tag i _ -> i
+    Var _ i   -> i
+    Tag _ i _ -> i
     v -> error $ "Please use 'var' to differentiate instead of " <> show v
 
 diffVar :: N a => Expr a -> VarId -> Expr a
-diffVar e i = case e of
-  Var vi
-    | vi == i   -> 1
-    | otherwise -> 0
-  Tag vi e
-    | vi == i   -> 1
-    | otherwise -> Tag vi $ d e -- is it correct at all? throw error?
-  Const _ -> 0
-  BinOp op a b -> binOp op a b
-  UnOp op a -> dUnOp op a * d a
-  NonDiff s -> error $ "non-differentiable: " <> s
-  where
-    d x = diffVar x i
+diffVar e by = unsafePerformIO $ do
+  m <- newUnsafeMemoMap
+  let
+    d = \ case
+      Var i vi -> m i $ if
+        | vi == by  -> 1
+        | otherwise -> 0
+      Tag i vi e -> m i $ if
+        | vi == by  -> 1
+        | otherwise -> -- Tag i vi $
+          d e -- is it correct at all? throw error?
+      Const _ -> 0
+      BinOp i op a b -> m i $ binOp op a b
+      UnOp i op a -> m i $ dUnOp op a * d a
     binOp op a b = case op of
       Plus      -> d a + d b
       Minus     -> d a - d b
       Multiply  -> d a * b + a * d b
       Divide    -> (d a * b - a * d b) / b^2
       Expt      -> a**b * (log a * d b + b * d a / a)
-      ExplicitD -> a * d b
     dUnOp op x = case op of
       Negate -> -1
-      Abs    -> NonDiff "abs"
-      Signum -> NonDiff "signum"
+      Abs    -> nonDiff "abs"
+      Signum -> nonDiff "signum"
       Exp    -> exp x
       Log    -> 1 / x
       Sqrt   -> 1 / (2 * sqrt x)
@@ -222,6 +230,85 @@ diffVar e i = case e of
       Step   -> k / (exp (k*x) + exp (-k*x) + 2)
     sec x = 1 / cos x
     sech x = 1 / cosh x
+    nonDiff s = error $ "non-differentiable: " <> s
+  pure $ d e
+
+-- 2^63/1e9/86400/365 = 292 years, should be enough.
+-- And 1Gz atomic increment is barely possible (more like 200MHz).
+idSource :: IORef Int
+idSource = unsafePerformIO (newIORef 0)
+{-# NOINLINE idSource #-}
+
+newId :: IO Int
+newId = atomicModifyIORef' idSource $ \x -> let z = x+1 in (z,z)
+
+-- adapted from 'uglymemo' package. Not thread-safe but faster.
+{-# NOINLINE newUnsafeMemoMap #-}
+newUnsafeMemoMap :: IO (Int -> a -> a)
+newUnsafeMemoMap = do
+  v <- newIORef IntMap.empty
+  let {-# NOINLINE m #-}
+      m idx r = unsafePerformIO $ do
+        m <- readIORef v
+        case IntMap.lookup idx m of
+          Nothing -> r `seq` do
+            modifyIORef' v (IntMap.insert idx r)
+            pure r
+          Just r  -> pure r
+  return m
+
+------------------------------------------------------------------------------
+-- Common subexpression elimination
+
+cse :: StructuralOrd a => Expr a -> Expr a
+cse e = snd $ S.evalState (go e) (Map.empty, IntMap.empty)
+  where
+    go = \ case
+      Var i v -> m i $
+        get (CVar v) (var v)
+      Tag i v e -> m i $ do
+        (ce, se) <- go e
+        get (CTag v ce) (tag v se)
+      Const x ->
+        get (CConst $ SCmp x) (Const x)
+      BinOp i op a b -> m i $ do
+        (ca, sa) <- go a
+        (cb, sb) <- go b
+        get (CBinOp op ca cb) (mkBinOp op sa sb)
+      UnOp i op a -> m i $ do
+        (ca, sa) <- go a
+        get (CUnOp op ca) (mkUnOp op sa)
+    get cexpr mkexpr = do
+      (m,im) <- S.get
+      case Map.lookup cexpr m of
+        Nothing -> do
+          S.put (Map.insert cexpr mkexpr m, im)
+          pure (cexpr, mkexpr)
+        Just e -> pure (cexpr, e)
+    m i act = do
+      (_,im) <- S.get
+      case IntMap.lookup i im of
+        Nothing -> do
+          r <- act
+          S.modify $ \ (m,im) -> (m, IntMap.insert i r im)
+          pure r
+        Just r ->
+          pure r
+
+data CExpr a
+  = CVar VarId
+  | CTag VarId (CExpr a)
+  | CConst (SCmp a)
+  | CBinOp BinOp (CExpr a) (CExpr a)
+  | CUnOp UnOp (CExpr a)
+  deriving (Eq, Ord, Show)
+
+toCExpr = \ case
+  Var _ v -> CVar v
+  Tag _ v e -> CTag v $ toCExpr e
+  Const c -> CConst $ SCmp c
+  BinOp _ op a b -> CBinOp op (toCExpr a) (toCExpr b)
+  UnOp _ op a -> CUnOp op (toCExpr a)
 
 ------------------------------------------------------------------------------
 -- Simplification
@@ -241,12 +328,10 @@ data FExpr a
   | FTag VarId (FExpr a)
   | FUnOp UnOp (FExpr a)
   | FExpt (FExpr a) (FExpr a)
-  | FExplicitD (FExpr a) (FExpr a)
   | FSum (SCmp a) (Map (FExpr a) (SCmp a))
     -- ^ c0 + expr1*c1 + expr2*c2 ...
   | FProduct (SCmp a) (Map (FExpr a) Integer)
     -- ^ c0 * expr1^c1 * expr2^c2 ...
-  | FNonDiff String
   deriving (Eq, Ord)
 
 fsimp :: (StructuralOrd a, N a) => FExpr a -> FExpr a
@@ -267,7 +352,6 @@ fsimp = fixedPoint $ \ case
     | Just 1 <- toConst b -> a
     | Just 0 <- toConst b -> FSum 1 []
     | otherwise -> FExpt (fsimp a) (fsimp b)
-  FExplicitD d e -> FExplicitD (fsimp d) (fsimp e)
   FUnOp Negate (FProduct c es) -> FProduct (-c) es
   FUnOp Negate (FSum c es) -> FSum (-c) $ Map.map negate es
   FUnOp Negate (FUnOp Negate e) -> e
@@ -277,7 +361,6 @@ fsimp = fixedPoint $ \ case
   FUnOp op e -> FUnOp op (fsimp e)
   e@FVar{} -> e
   FTag i e -> FTag i (fsimp e)
-  e@FNonDiff{} -> e
   where
     recurse
       :: (StructuralOrd a, N a, StructuralEq b, Num b)
@@ -330,11 +413,9 @@ fexpand = \ case
     [] -> r c0
     (x:xs) -> goProd (firstProd c0 x) xs
   FExpt a b -> e a ** e b
-  FExplicitD a b -> error "explicitD" -- e a `explicitD` e b
   FUnOp op x -> unOp op $ e x
   FVar i -> var i
   FTag i x -> tag i (e x)
-  FNonDiff s -> eval (error "var in NonDiff?") (NonDiff s)
   where
     -- put negative constants last to have more a-b and a/b
     -- instead of -1*b+a and 1/b*a
@@ -368,10 +449,10 @@ fexpand = \ case
 
 factor :: N a => Expr a -> FExpr a
 factor = \ case
-  Var i -> FVar i
-  Tag i e -> FTag i $ factor e
+  Var _ i -> FVar i
+  Tag _ i e -> FTag i $ factor e
   Const c -> FSum (SCmp c) Map.empty
-  BinOp op a b ->
+  BinOp _ op a b ->
     let m ca cb = Map.fromListWith (+) [(factor a, ca), (factor b, cb)]
     in
     case op of
@@ -380,9 +461,7 @@ factor = \ case
       Multiply  -> FProduct 1 $ m 1 1
       Divide    -> FProduct 1 $ m 1 (-1)
       Expt      -> FExpt (factor a) (factor b)
-      ExplicitD -> FExplicitD (factor a) (factor b)
-  UnOp op e -> FUnOp op $ factor e
-  NonDiff s -> FNonDiff s
+  UnOp _ op e -> FUnOp op $ factor e
 
 ------------------------------------------------------------------------------
 -- Instances
@@ -405,30 +484,32 @@ instance N a => Ord (Expr a) where
 -- default 'Eq', could it be derived in some way?
 instance StructuralEq a => StructuralEq (Expr a) where
   structuralEq a b = case (a, b) of
-    (Var a, Var b) -> a == b
-    (Tag ta ea, Tag tb eb) -> ta == tb && structuralEq ea eb
+    (Var ia a, Var ib b) -> ia == ib || a == b
+    (Tag ia ta ea, Tag ib tb eb) -> ia == ib || ta == tb && structuralEq ea eb
     (Const a, Const b) -> structuralEq a b -- but NaN /= NaN
-    (BinOp ao a1 a2, BinOp bo b1 b2) ->
-      ao == bo && structuralEq a1 b1 && structuralEq a2 b2
-    (UnOp ao a, UnOp bo b) ->
-      ao == bo && structuralEq a b
-    (NonDiff a, NonDiff b) -> a == b
+    (BinOp ia oa a1 a2, BinOp ib ob b1 b2) -> ia == ib ||
+      oa == ob && structuralEq a1 b1 && structuralEq a2 b2
+    (UnOp ia oa a, UnOp ib ob b) -> ia == ib ||
+      oa == ob && structuralEq a b
     -- to have a warning when new cases are added:
     (Var{}, _) -> False
     (Tag{}, _) -> False
     (Const _, _) -> False
     (BinOp{}, _) -> False
     (UnOp{}, _) -> False
-    (NonDiff{}, _) -> False
 
 instance Fractional a => IsString (Expr a) where
   fromString = parseExpr
 
 foldBinOp op (Const a) (Const b) = Const $ binOp op a b
-foldBinOp op a b = BinOp op a b
+foldBinOp op a b = mkBinOp op a b
 
---foldUnOp op (Const a) = Const $ unOp op a
-foldUnOp op a = UnOp op a
+mkBinOp op a b = unsafePerformIO $ newId >>= \ i -> pure $ BinOp i op a b
+
+foldUnOp op (Const a) = Const $ unOp op a
+foldUnOp op a = mkUnOp op a
+
+mkUnOp op a = unsafePerformIO $ newId >>= \ i -> pure $ UnOp i op a
 
 instance N a => Num (Expr a) where
   a + b
@@ -494,14 +575,12 @@ instance N a => Erf (Expr a) where
   erf  = foldUnOp Erf
   erfc = foldUnOp Erfc
 
-instance StructuralEq a => StructuralOrd (Expr a) where
-  structuralCompare = error "StructuralOrd (Expr a) is not implemented"
+instance StructuralOrd a => StructuralOrd (Expr a) where
+  structuralCompare = compare `on` toCExpr
 
 instance N a => N (Expr a) where
+  exprType _ = "Expr (" <> exprType (undefined :: a) <> ")"
   step = foldUnOp Step
---   explicitD a b
---     | SCmp a == 0 = 0
---     | otherwise   = foldBinOp ExplicitD a b
   toN = Const . toN
   toD = toD . unsafeEval "toD"
 
@@ -522,10 +601,38 @@ instance N a => Show (Expr a) where
 toMaxima :: N a => Expr a -> String
 toMaxima = filter (/= ' ') . showExpr SEM_Maxima (False, P.AssocNone, 0)
 
+showExprWithSharing :: N a => Expr a -> String
+showExprWithSharing expr
+  | null vars = toplevel
+  | otherwise = unlines
+    $ toplevel : mconcat ["where -- ", show (length vars), " subexpressions"]
+    : [mconcat ["  ", idx i, " = ", c] | (i,c) <- vars]
+  where
+    (toplevel, (_, vars)) = S.runState (go expr) (IntSet.empty, [])
+    idx i = "_" <> show i
+    go = \ case
+      Var _ n -> pure n
+      Tag i n e -> add i ("_" <> n) $ go e
+      Const a -> pure $ show a
+      BinOp i op l r -> add i "" $ do
+        sl <- go l
+        sr <- go r
+        pure $ unwords [sl, showBinOp op, sr]
+      UnOp i op a -> add i "" $ do
+        la <- go a
+        pure $ unwords [showUnOp op, la]
+    add i suffix action = do
+      (m, vs) <- S.get
+      when (IntSet.notMember i m) $ do
+        S.put (IntSet.insert i m, vs)
+        content <- action
+        S.modify $ \ (m,vs) -> (m, (i,content):vs)
+      pure $ idx i <> suffix
+
 showExpr :: N a => ShowExprMode -> (Bool, P.Assoc, Int) -> Expr a -> String
 showExpr m p@(pNegate, pa, pp) = \ case
-  Var n -> parensIf argParens [n]
-  Tag n e ->
+  Var _ n -> parensIf argParens [n]
+  Tag _ n e ->
     if m == SEM_Maxima then
       showExpr m p e
     else
@@ -541,36 +648,35 @@ showExpr m p@(pNegate, pa, pp) = \ case
 --        else showExpr m (False,pa,pp) (fromInteger n / fromInteger d :: Expr ())
        -- show like a division -1%2 -> (-1)/2, not (-1/2) as the second
        -- one will be parsed as a division and not as a rational constant
-  BinOp op l r ->
+  BinOp _ op l r ->
     let (a, aLeft, aRight, p) = fixity op
     in
       parensIf (p < pp || (p == pp && diffAssoc a pa))
         [showExpr m (False,aLeft ,p) l, showBinOp op
         ,showExpr m (False,aRight,p) r]
-  UnOp op a ->
+  UnOp _ op a ->
     let f@(_, _, p) = (op == Negate, P.AssocNone, 10)
     in
       parensIf (p <= pp || (op == Negate && pp > 0)) [showUnOp op, showExpr m f a]
-  NonDiff s -> error $ "non-differentiable: " <> s
   where
     argParens = m == SEM_Maxima && pp == 10 && not pNegate
-    diffAssoc a b = case (a, b) of -- no Eq instance for Assoc
-      (P.AssocLeft, P.AssocLeft) -> False
-      (P.AssocRight, P.AssocRight) -> False
-      _ -> True
-    parensIf :: Bool -> [String] -> String
-    parensIf needParens (unwords -> x)
-      | needParens = "(" <> x <> ")"
-      | otherwise  = x
+
+diffAssoc a b = case (a, b) of -- no Eq instance for Assoc
+  (P.AssocLeft, P.AssocLeft) -> False
+  (P.AssocRight, P.AssocRight) -> False
+  _ -> True
+parensIf :: Bool -> [String] -> String
+parensIf needParens (unwords -> x)
+  | needParens = "(" <> x <> ")"
+  | otherwise  = x
 
 debugShowExpr :: N a => Expr a -> String
 debugShowExpr = \ case
-  Var n -> "Var " <> show n
-  Tag t e -> mconcat ["Tag ", show t, " (", show e, ")"]
+  Var i n -> unwords ["Var", show i, show n]
+  Tag i t e -> mconcat ["Tag ", show i, " ", show t, " ", go e]
   Const a -> mconcat ["Const (", show a, ")"]
-  BinOp op a b -> unwords ["BinOp", show op, go a, go b]
-  UnOp op a -> unwords ["UnOp", show op, go a]
-  NonDiff s -> "NonDiff " <> show s
+  BinOp i op a b -> unwords ["BinOp", show i, show op, go a, go b]
+  UnOp i op a -> unwords ["UnOp", show i, show op, go a]
   where
     go x = mconcat ["(", debugShowExpr x, ")"]
 
@@ -580,7 +686,6 @@ showBinOp = \ case
   Multiply  -> "*"
   Divide    -> "/"
   Expt      -> "**"
-  ExplicitD -> "'"
 
 showUnOp = \ case
   Negate -> "-"
@@ -617,9 +722,7 @@ showFExpr root = \ case
   FProduct c l ->
     parens "(Π " ")" $ intercalate "*" $ showC c : showP (Map.toList l)
   FUnOp op a -> parens "(" ")" $ unwords [show op, showFExpr False a]
-  FNonDiff s -> show (NonDiff s :: Expr Double)
   FExpt a b -> showFExpr False a <> "**" <> showFExpr False b
-  FExplicitD d e -> show d <> "'" <> showFExpr root e
   where
     showC (SCmp x) = show x
     showS = map $ \ case
@@ -645,7 +748,6 @@ fixity = \ case
   Multiply  -> (P.AssocLeft , P.AssocLeft, P.AssocLeft , 7)
   Divide    -> (P.AssocLeft , P.AssocLeft, P.AssocNone , 7)
   Expt      -> (P.AssocRight, P.AssocNone, P.AssocRight, 8)
-  ExplicitD -> (P.AssocRight, P.AssocNone, P.AssocRight, 9)
 
 tagFixity =    (P.AssocRight, P.AssocNone, P.AssocRight, 0)
 
@@ -657,7 +759,7 @@ parseExpr s = either (error . show) id $ P.parse (expr <* P.eof) s s
     term
       =   parens expr
       <|> constant
-      <|> (Var <$> identifier)
+      <|> (var <$> identifier)
       <?> "simple expression"
 
     constant
@@ -665,7 +767,7 @@ parseExpr s = either (error . show) id $ P.parse (expr <* P.eof) s s
 
     table =
       [ [prefix "+" id] <>
-        [prefix (showUnOp op) (UnOp op)
+        [prefix (showUnOp op) (mkUnOp op)
         |op <- sortBy (comparing $ Down . show) -- put "erfc" before "erf"
           [minBound..maxBound :: UnOp]]
       ]
@@ -673,15 +775,15 @@ parseExpr s = either (error . show) id $ P.parse (expr <* P.eof) s s
 
     binops =
       reverse $ Map.elems $ Map.fromListWith (<>) $
-      [ (prio, [binary (showBinOp op) (BinOp op) assoc])
+      [ (prio, [binary (showBinOp op) (mkBinOp op) assoc])
       | op <- [minBound..maxBound]
       , let (assoc, _, _, prio) = fixity op ]
       <>
       [ let (assoc, _, _, prio) = tagFixity
         in
-        (prio, [binary "@" tag assoc]) ]
-    tag (Var i) e = Tag i e
-    tag v _ = error "Expected a tag name before '@'"
+        (prio, [binary "@" tagged assoc]) ]
+    tagged (Var _ vi) e = tag vi e
+    tagged v _ = error "Expected a tag name before '@'"
 
     binary name fun assoc = P.Infix  (fun <$ reservedOp name) assoc
     prefix name fun       = P.Prefix (fun <$ reservedOp name)
@@ -709,11 +811,11 @@ substTest x = eval (\ v -> toN $ fromJust $ lookup v testVars) x
 
 genExpr :: (Expr Double -> Bool) -> [(String, Double)] -> Gen (Expr Double)
 genExpr goodExpr vars = filterGen goodExpr $ oneof
-  [Var <$> elements (map fst vars)
+  [var <$> elements (map fst vars)
   ,Const <$> arbitrary
-  ,Tag <$> elements ["i","j","k"] <*> g
-  ,BinOp <$> arbitrary <*> g <*> g
-  ,UnOp  <$> filterGen diffUnOp arbitrary <*> g
+  ,tag <$> elements ["i","j","k"] <*> g
+  ,mkBinOp <$> arbitrary <*> g <*> g
+  ,mkUnOp  <$> filterGen diffUnOp arbitrary <*> g
   ]
   where
     g = genExpr goodExpr vars
@@ -729,13 +831,13 @@ filterGen pred gen = do
 
 goodSimplifyExpr :: Expr Double -> Bool
 goodSimplifyExpr expr = ok (e expr) && case expr of
-  BinOp Expt _ (Const b) -> abs b < 1e3
-  BinOp Expt _ b -> abs (e b) < 1e3
+  BinOp _ Expt _ (Const b) -> abs b < 1e3
+  BinOp _ Expt _ b -> abs (e b) < 1e3
     && abs (e b - (fromInteger $ round $ e b)) > eps
   -- (-1)**30.000000001 = NaN, so we either check constant exponents
   -- that have no jitter or exponents that are far enough from integers
-  BinOp Divide _ b -> abs (e b) > eps
-  UnOp op x
+  BinOp _ Divide _ b -> abs (e b) > eps
+  UnOp _ op x
     | op `elem` ([Sin, Cos, Tan] :: [UnOp]) ->
       -- trigonometric functions can have a huge difference
       -- when pi is on the level of floating point jitter
@@ -773,7 +875,7 @@ numDiff' bump e = (eb bump - eb (-bump)) / (2*bump)
     eb b = eval (\ case "x" -> x+b; v -> fromJust $ lookup v testVars) e
     x = testEval "x"
 
-prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
+_prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
   where
     debug = unlines
       ["Debug Expr:"
@@ -789,8 +891,8 @@ prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
     n = numDiff e
     s = testEval ds
 
-prop_parse :: Expr Double -> Property
-prop_parse x = counterexample debug $ e `structuralEq` parseExpr (show e)
+_prop_parse :: Expr Double -> Property
+_prop_parse x = counterexample debug $ e `structuralEq` parseExpr (show e)
   where
     debug = unlines
       ["Debug Expr:"

@@ -73,6 +73,7 @@ import Market
 import Tenor
 import Analytic
 import Symbolic
+import qualified Symbolic.Matrix as S
 import Number
 
 data Option a
@@ -703,11 +704,11 @@ volTableRow surface = \ (tagVolT . lift -> t) -> case Map.splitLookup (toD t) ro
         VolTableRow
         { t = t
         , σatm  = i "ATM" $ \VolTableRow{σatm} -> σatm
-        , σrr25 = - i "RR25" (\VolTableRow{σrr25} -> abs σrr25)
+        , σrr25 = -i "RR25" (\VolTableRow{σrr25} -> -σrr25)
           -- TODO: it makes no sense to interpolate difference between volatilities
           -- we should first calibrate two smiles, get kATM/P25/C25,
           -- their vols, interpolate strikes and vols
-          -- and calibrate new smile.
+          -- and calibrate the new smile.
           -- interpolate like all delta conventions are the same
         , σbf25 = i "BF25" $ \VolTableRow{σbf25} -> σbf25
         , σrr10 = i "RR10" $ \VolTableRow{σrr10} -> σrr10
@@ -771,14 +772,16 @@ m inp f = modify inp f mkt
 --solvePriceToVol price = solve (\ x -> p (modify ImpliedVol (const $ const x) mkt) PV - price)
 
 --fitTest :: [(Double, [Double])]
-fitTest :: N a => (a, [[a]], [a])
-fitTest = (d2xda2Bump, R.jacobian system is, system is)
+fitTest :: N a => (Maybe a, [a])
+fitTest = d2xda2Bump `seq` (Just d2xda2Bump, -- R.jacobian system is,
+           system is)
   where
-    d2xda2Bump = bumpDiff2 (\ x -> head $ system [a+x]) 0 0.0001
-    is@[a] = [1]
+    d2xda2Bump = bumpDiff2 (\ x -> system [a,b+x] !! 1) 0 0.00001
+    is@[a,b] = [0.2, 0.2]
     system inputs =
-      (\ [a] -> fitSystemThrow [a] [1] $ \ [a] [x] ->
-      [  a*x^2 - 4
+      (\ [a,b] -> fitSystemThrow [a,b] [0.5,0.5] $ \ [a,b] [x,y] ->
+      [  sin (exp a)^3 + sin b - x^2 - 1
+      ,  2*y^3 - x
       ]) inputs
 --     d2xda2Bump = bumpDiff (\ x -> head $ system [a+x,b,c]) 0 0.0001
 --     is@[a,b,c] = [1,1,1]
@@ -857,16 +860,67 @@ fitSystem inputs guesses system0
 --   map realToFrac results
   Right $ flip replace guesses $ zipWith
     (\ r dis ->
-      realToFrac r + sum (zipWith (\ d i -> explicitD (toN d) i (toD i)) (LA.toList dis) inputsL))
+      toN r + sum (zipWith (\ d i -> explicitD (toN d) i (toD i)) (LA.toList dis) inputsL))
     results (
       trace (
+        let j :: S.M (Double, [Double])
+            j = R.jacobian' ift $ (toD <$> toList inputs) <> results
+
+            ift
+              :: Reifies s R.Tape
+              => [R.Reverse s Double] -> S.M (R.Reverse s Double)
+            ift adInputs =
+              let (is, rs) = splitAt (length inputs) adInputs
+                  x = vars "i" is
+                  y = vars "g" rs
+                  f = system x y
+                  -- symbolic jacobian immediately converted back to AD
+                  fJ xs = unlift <$> S.jacobian f xs
+              in
+                -- compute jResultsInputs on AD values
+                S.matnegate (S.invert $ fJ y) `S.matmul` fJ x
+            x = vars "i" inputs
+            y = vars "g" $ map toN $ results
+            f = system x y
+        in
           unlines $
-          zipWith (\ n _g -> printf "depends(g%d,[%s]);" (n::Int)
-             (intercalate "," (map show $ vars "i" inputs)) :: String)
-            [0..] (toList guesses)
-          <>
-          zipWith (\ n e -> printf "e%d:%s;" (n::Int) (toMaxima e) :: String)
-            [0..] (system (vars "i" inputs) (vars "g" guesses))
+          [exprType $ head f
+--           ,show j
+--           ,LA.dispf 3 jResultsInputs
+          ,show $
+              let i = 1
+                  o = 0
+                  (dodi, splitAt (length inputs) -> (dis,dos)) = j S.!. (o,i)
+              in
+                [dis !! i] <> [dos !! v * fst (j S.!. (v,i)) |v <- [0..m-1]]
+--           ,show $
+--            (\mat ->
+--               let i = 1
+--                   o = 0
+--                   dodi = mat S.!. (o,i)
+--                   d = toD . diff dodi
+--               in
+--                 [d (var $ "i" <> show i)]
+--                   <> [d (var $ "g" <> show v) * toD (mat S.!. (v,i))
+--                      |v <- [0..m-1]]
+--            ) $
+-- --            toD <$>
+-- --            toD . (\x -> diff x "i0" + diff x "g1" * x) <$>
+--            -- showExprWithSharing . cse <$>
+--            -- 5k exprs -> 1k exprs after cse
+-- --            (\x -> if isNaN (toD x) then show x else show (toD x)) $ (!. (0,0)) $
+-- --            matsimplify $ --
+-- --           (`diff` "i0") <$>
+--            (S.matnegate (S.invert $ S.jacobian f y) `S.matmul`
+--             S.jacobian f x)
+          ]
+--           <>
+--           zipWith (\ n _g -> printf "depends(g%d,[%s]);" (n::Int)
+--              (intercalate "," (map show $ vars "i" inputs)) :: String)
+--             [0..] (toList guesses)
+--           <>
+--           zipWith (\ n e -> printf "e%d:%s;" (n::Int) (toMaxima e) :: String)
+--             [0..] f
 {-
 it's easy to have a derivative of the implicit function in a symbolic form
 (expressions get massive for 5x5 matrix, but it works)
@@ -914,7 +968,11 @@ diff((-invert(jacobian([f,g,h],[x,y,z])) . jacobian([f,g,h],[w,v]))[1,1], w);
       $ system (map (toN.toD) inputsL) (tagged "r" r)
     tagged prefix is =
       zipWith (\ n v -> tag (prefix <> show n) $ lift v) [0..] is
-    vars prefix xs = zipWith (\i _ -> var $ prefix <> show i :: Expr Double) [0..] (toList xs)
+    vars :: Traversable t => String -> t a -> [Expr a]
+    vars prefix xs = zipWith (\i x ->
+                                -- var (prefix <> show i)
+                                tag (prefix <> show i) $ lift x
+                             ) [0..] (toList xs)
     systemD1 (a:as) r =
       map (\ e -> unlift $ diff e "a") $
       system (tag "a" (lift a) : map lift as) (map lift r)
@@ -1197,7 +1255,7 @@ gradeSpot x
 --   | otherwise = 1 - 2*(1-x)^2
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
-main = g
+main = print (localVol mkt 1.1 1 :: Double)
 _main = defaultMain
   [ bgroup "fem" (map benchFem [(100,100), (100,500), (500,100), (500,500)])
   , bgroup "integrated" (map benchIntegrated [1000, 10000, 100000, 1000000])

@@ -1,13 +1,16 @@
 {-# OPTIONS_GHC -Wincomplete-patterns #-}
 -- | Symbolic matrix
 module Symbolic.Matrix
-  ( M, (!)
+  ( M, (!.), matrix
+  , jacobian, invert, matmul, matnegate, matsimplify
   ) where
 
 import Data.Array
+import Data.Char
 import Data.List (intercalate)
 import Text.Printf
 import Symbolic
+import Number
 
 newtype M a = M (Array (Int, Int) a)
 
@@ -41,17 +44,41 @@ matrix m n l
   | otherwise =
     M $ listArray ((0,0), (m-1,n-1)) $ concat l
 
+testMatrix :: Int -> Int -> M (Expr a)
+testMatrix m n = matrix m n
+  [[var (chr (ord 'a' + r) : show c) | c <- [0..n-1]] | r <- [0..m-1]]
+
 test :: M (Expr Double)
 test =
-  matrix 2 2 [["a","b"],["c","d"]]
---   matrix 3 3 [["a","b","c"],["d","e","f"],["g","h","i"]]
---   matrix 4 4 [["a","b","c","d"],["e","f","g","h"],["i","j","k","l"],["m","n","o","p"]]
+  testMatrix 5 5
 --  matrix 3 2 [["a","b"],["c",diff "ddddd*exp(x/log x)" "x"],["f","g"]]
+
+jacobian fs vars = matrix (length fs) (length vars)
+  [[diff f v | v <- vars] | f <- fs]
+
+matnegate :: Num a => M a -> M a
+matnegate = fmap negate
+
+matsimplify :: N a => M (Expr a) -> M (Expr a)
+matsimplify = fmap simplify
+
+instance Functor M where
+  fmap f = mapi $ \ _ _ -> f
+
+matmul a b
+  | an /= bm = error $ printf
+    "matmul: inconsistent matrix sizes (%d x %d) and (%d x %d)" am an bm bn
+  | otherwise = matrix am bn
+    [[sum [a!.(mr,i)*b!.(i,mc) | i<-[0..an-1]] | mc <- [0..bn-1]] | mr <- [0..am-1]]
+  where
+    (am,an) = msize a
+    (bm,bn) = msize b
 
 determinant mat
   | m /= n = error $ printf
     "determinant: matrix must be square; found %d rows, %d columns" m n
   | m == 1 = mat!.(0,0)
+  | m == 0 = 1
   | otherwise =
     -- https://en.wikipedia.org/wiki/Laplace_expansion
     sum [mat!.(0,c) * cofactor 0 c mat | c <- [0..n-1]]

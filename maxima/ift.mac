@@ -1,0 +1,24 @@
+/* -*- mode: maxima -*- */
+
+es:[x^2 + y^2 + z^2 - a, x+y+z-a];
+xza(z,a) := rhs(float(solve(subst([z=z,a=a],es), [x,y]))[1][1]);
+
+xy_za:factor(-invert(jacobian(es,[x,y])) . jacobian(es,[z,a]));
+
+factor(jacobian([xy_za[1,1],xy_za[2,1]],[x,y]));
+
+sol:solve(subst([z=1/2,a=1],es),[x,y])[1];
+h:0.001;
+fd(_f,_x) := (_f(_x+h) - _f(_x-h))/(2*h);
+dxdz_num:fd(lambda([z], xza(z,1)), 1/2);
+d2xdz2_num:fd(lambda([z], fd(lambda([z], xza(z,1)), z)), 1/2);
+d2xdzda_num:fd(lambda([z], fd(lambda([a], xza(z,a)), 1)), 1/2);
+
+float(subst(append(sol,[z=1/2,a=1]),xy_za));
+
+d2xdz2_ana:factor(diff(xy_za[1,1],z) + diff(xy_za[1,1],x)*xy_za[1,1] + diff(xy_za[1,1],y)*xy_za[2,1]);
+
+d2xdzda_ana:factor(diff(xy_za[1,1],a) + diff(xy_za[1,1],x)*xy_za[1,2] + diff(xy_za[1,1],y)*xy_za[2,2]);
+
+d2xdzda_num;
+float(subst(append(sol,[z=1/2,a=1]),d2xdzda_ana));
