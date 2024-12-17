@@ -583,6 +583,7 @@ instance N a => N (Expr a) where
   step = foldUnOp Step
   toN = Const . toN
   toD = toD . unsafeEval "toD"
+  dLevel _ = DLAny
 
 unsafeEval debugName =
   eval (\ v -> error $ "toD: undefined variable " <> show v)

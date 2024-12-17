@@ -373,7 +373,7 @@ mapInputs f = -- zip is $
     is = map fst $ inputs mkt
 greeksBumpImpliedVol = mapInputs (\ i -> dvdx' (\m -> impliedVol m (1.1 + get PricingDate m)) mkt 1 i 0.00001)
 greeksADImpliedVol = snd $ jacobianPvGreeks (\m -> impliedVol m (1.1 + get PricingDate m) 1)
-greeksBumpLocalVol = mapInputs (\ i -> dvdx' (\m -> localVol m (1.1 + get PricingDate m)) mkt 1 i 0.00001)
+greeksBumpLocalVol = mapInputs (\ i -> dvdx' (\m -> localVol m (1.1 + get PricingDate m)) mkt 1 i 0.000001)
 greeksADLocalVol = snd $ jacobianPvGreeks (\m -> localVol m (1.1 + get PricingDate m) 1)
 greeksBump = mapInputs (\ i -> dvdx PV i 0.00001)
 greeksBumpIntegrated = mapInputs (\ i -> dvdx' (const . integrated) mkt () i 0.00001)
@@ -509,32 +509,21 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
   Smile_
   { smileImpliedVol = unlift . solvedS . lift
   , smileLocalVol = \ k ->
-      -- diff solvedS t -- 79k(118k not simplified)
---      (trace $ show $ length $ show $ diff (solvedS $ lift k) t) $
-      unlift $ (diff (solvedS $ lift k) t)
+--      (trace $ take 100 $ showExprWithSharing $ diff (solvedS $ lift k) t) $
+      unlift $ diff (solvedS $ lift k) t
   }
 {-
 λ> bumpDiff (\ t -> localVol mkt (1.1+t) 1) 0 0.0001
-2.2016559180458584e-3
+2.201655918713727e-3
 λ> AD.grad (\ [t] -> localVol mkt (1.1+t) 1) [0]
-[-0.23278584935191213]
+[2.201655812057629e-3]
 λ> localVol mkt 1.1 1
--5.815826767965754e-3
+-5.815826767965226e-3
 λ> bumpDiff (\ t -> impliedVol mkt (1.1+t) 1) 0 0.0001
 -5.815826784605349e-3
 λ> AD.grad (\ [t] -> impliedVol mkt (1.1+t) 1) [0]
-[-5.815826767967286e-3]
+[-5.815826767966395e-3]
 -}
-  -- d/dt
---   -5.815826767965754e-3 -- symbolic
---   -5.81582676796051e-3  -- ad impliedVol
---   -5.81582671188574e-3  -- bump impliedVol
-  -- d2/dt2 is wrong
---   -0.23278584935191496  -- ad of symbolic d/dt
---   -0.23278584935190863  -- symbolic
---    2.1988660892091616e-3 <<< bump, a close to correct one
---  we need explicitD tower, having explicitD a b -> a * d b
---  is not enough, need to play with newton to get a second derivative
   where
     pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ solvedS k * 100) (toD $ s*100)
     f = forwardRate rates t -- F_0,T
@@ -556,6 +545,7 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
       in
         [vStrangle env k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS]
     fitSS env σ25dSS =
+--      trace (show ("fitSS", toD σ25dSS)) $
       fitSystemThrow (T σ25dSS env) (T5 (-2) (-0.1) 0.1 k25dpMS k25dcMS)
                  $ \ (T σ25dSS env) (T5 c0 c1 c2 k25dp k25dc) ->
       let sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
@@ -830,11 +820,12 @@ fitSystem
   :: (Traversable i, Functor i, Traversable r, Functor r, N a, Show (r a))
   => i a -- ^ n inputs
   -> r a -- ^ m guesses
-  -> (forall a . N a => i a -> r a -> [a]) -- ^ n inputs -> m guesses -> me errors
+  -> (forall a . N a => i a -> r a -> [a]) -- ^ n inputs -> m guesses -> m errors
   -> Either String (r a) -- ^ results with derivatives to inputs
 fitSystem inputs guesses system0
-  | me < m = error $ mconcat ["Can’t fit ", show m, " variables with "
-    , show me, " equations"]
+  | me /= m = error $ mconcat
+    ["Number of equations (", show me, ") must match the number of variables ("
+    , show m, ")"]
   | err > 1e-10 = -- Sum of squared residuals (sum . map (^2))
     -- if there's a big error, there's a big chance that
     --  * LA.inv will fail with a singular matrix
@@ -858,142 +849,96 @@ fitSystem inputs guesses system0
   | otherwise =
 --   trace (show path) $
 --   map realToFrac results
-  Right $ flip replace guesses $ zipWith
-    (\ r dis ->
-      toN r + sum (zipWith (\ d i -> explicitD (toN d) i (toD i)) (LA.toList dis) inputsL))
-    results (
-      trace (
-        let j :: S.M (Double, [Double])
-            j = R.jacobian' ift $ (toD <$> toList inputs) <> results
-
-            ift
-              :: Reifies s R.Tape
-              => [R.Reverse s Double] -> S.M (R.Reverse s Double)
-            ift adInputs =
-              let (is, rs) = splitAt (length inputs) adInputs
-                  x = vars "i" is
-                  y = vars "g" rs
-                  f = system x y
-                  -- symbolic jacobian immediately converted back to AD
-                  fJ xs = unlift <$> S.jacobian f xs
-              in
-                -- compute jResultsInputs on AD values
-                S.matnegate (S.invert $ fJ y) `S.matmul` fJ x
-            x = vars "i" inputs
-            y = vars "g" $ map toN $ results
-            f = system x y
-        in
-          unlines $
-          [exprType $ head f
---           ,show j
---           ,LA.dispf 3 jResultsInputs
-          ,show $
-              let i = 1
-                  o = 0
-                  (dodi, splitAt (length inputs) -> (dis,dos)) = j S.!. (o,i)
-              in
-                [dis !! i] <> [dos !! v * fst (j S.!. (v,i)) |v <- [0..m-1]]
---           ,show $
---            (\mat ->
---               let i = 1
---                   o = 0
---                   dodi = mat S.!. (o,i)
---                   d = toD . diff dodi
---               in
---                 [d (var $ "i" <> show i)]
---                   <> [d (var $ "g" <> show v) * toD (mat S.!. (v,i))
---                      |v <- [0..m-1]]
---            ) $
--- --            toD <$>
--- --            toD . (\x -> diff x "i0" + diff x "g1" * x) <$>
---            -- showExprWithSharing . cse <$>
---            -- 5k exprs -> 1k exprs after cse
--- --            (\x -> if isNaN (toD x) then show x else show (toD x)) $ (!. (0,0)) $
--- --            matsimplify $ --
--- --           (`diff` "i0") <$>
---            (S.matnegate (S.invert $ S.jacobian f y) `S.matmul`
---             S.jacobian f x)
-          ]
---           <>
---           zipWith (\ n _g -> printf "depends(g%d,[%s]);" (n::Int)
---              (intercalate "," (map show $ vars "i" inputs)) :: String)
---             [0..] (toList guesses)
---           <>
---           zipWith (\ n e -> printf "e%d:%s;" (n::Int) (toMaxima e) :: String)
---             [0..] f
-{-
-it's easy to have a derivative of the implicit function in a symbolic form
-(expressions get massive for 5x5 matrix, but it works)
-
-matrix([-invert(jacobian([x^2+y^2-1],[y]))]) . jacobian([x^2+y^2-1],[x]);
-
-depends([f,g,h,i,j],[x,y,z,w,v]);
-
-(-invert(jacobian([f,g],[x,y])) . jacobian([f,g],[w]));
-
-/* d2x/dy2 */
-diff(matrix([-invert(jacobian([f],[x]))]) . jacobian([f],[y]), y);
-
-diff((-invert(jacobian([f,g,h],[x,y,z])) . jacobian([f,g,h],[w,v]))[1,1], w);
--}
--- # solve([diff(e0)=0], diff(g0,i0));
---           <>
--- solve([diff(e2)=0], diff(g0,i8)); -- very long
---           map (\ n -> printf "solve([diff(e0, i0) = 0], diff(g0,i0));
-      ) $
---       trace (show (jr results, "inv", LA.inv (jr results), guesses, inputsD, results, ji inputsD, jResultsInputs)) $
-      LA.toRows jResultsInputs)
+  trace (printf "%s %d x %d" (exprType $ head $ toList inputs) m n) $
+  Right $ flip replace guesses $
+    case dLevel proxy of
+      DLNone -> map toN results
+      DL1st  -> resultsWith1stDerivatives
+      DLAny  -> resultsWith2ndDerivatives
+--       trace (show (jr results, "inv", LA.inv (jr results), guesses, inputsD, results, ji inputsD, LA.dispf 3 jResultsInputs)) $
   where
-    fmtP (Percent p)
-      | abs p < 5 && abs p > 0.0001 = printf "%9.5f%%" p
-      | otherwise = printf "%10.3e" (p/100)
-    fmtD = printf "%10.3g" -- 1.123e-197 is 10 characters
-    showDL = unwords . map fmtD
+    proxy = head $ toList inputs
     (nIterations:err:lastGuesses) = LA.toList $ last $ LA.toRows path
-    me = length $ system0 inputs guesses -- determine the number of equations
-    system is gs
-      | length es /= me = error $ "system returned " <> show (length es)
-        <> " equations instead of " <> show me
-      | otherwise = es
-      where es = system0 (replace is inputs) (replace gs guesses)
+    -- numerically computed 1st order derivatives,
+    -- fast, but AD won't work if the result is symbolically differentiated
+    -- (as there are no 2nd-order derivatives)
+    resultsWith1stDerivatives =
+      zipWith (\ r dis ->
+        toN r + sum
+        [explicitD (toN d) i (toD i)
+        |(d,i) <- zip (LA.toList dis) inputsL, d /= 0])
+      results
+      (LA.toRows jResultsInputs)
+    -- mixed symbolic-AD computed 2nd-order derivatives
+    -- very slow, but 'diff' of the result produces correct AD derivatives
+    resultsWith2ndDerivatives =
+      [toN r
+       -- 1st order
+       + sum
+         [explicitD (toN d) i (toD i)
+         |(ii, i) <- zip [0..] inputsL, let (d,_) = j S.!. (io,ii), d /= 0]
+       -- 2nd order
+       + sum
+         [-- trace (printf "∂²o%d/∂i%d∂i%d = %f" io ix iy d) $
+          explicitD2 (toN (d/2)) x (toD x) y (toD y)
+         |(ix, x) <- zip [0..] inputsL
+         ,(iy, y) <- zip [0..] inputsL
+         ,let (_dodx, splitAt n -> (dis,dos)) = j S.!. (io,ix)
+         ,let d = sum $ [dis !! iy] <> [dos !! v * fst (j S.!. (v,iy)) | v <- [0..m-1]]
+         ,d /= 0]
+      |(io, r) <- zip [0..] results]
     -- Jacobian of results to inputs via the implicit function theorem
     -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
     jResultsInputs = (- (LA.inv $ jr results)) <> ji inputsD
---     jr2 = matrix m  m . j2
-    jr  = matrix m  m . R.jacobian (\ r -> system (map (toN.toD) inputsL) r)
-    jrg = matrix me m . R.jacobian (\ r -> system (map (toN.toD) inputsL) r)
-    ji  = matrix m  n . R.jacobian (\ i -> system i (map toN results))
-    j2 r =
-      map (\ e -> [unlift $ diff (diff e i) i | i <- tagged "r" r])
-      $ system (map (toN.toD) inputsL) (tagged "r" r)
-    tagged prefix is =
-      zipWith (\ n v -> tag (prefix <> show n) $ lift v) [0..] is
-    vars :: Traversable t => String -> t a -> [Expr a]
-    vars prefix xs = zipWith (\i x ->
-                                -- var (prefix <> show i)
-                                tag (prefix <> show i) $ lift x
-                             ) [0..] (toList xs)
-    systemD1 (a:as) r =
-      map (\ e -> unlift $ diff e "a") $
-      system (tag "a" (lift a) : map lift as) (map lift r)
-    combine s = foldl1 (zipWith (+))
-      $ chunksOf m (s + replicate (m - (me `mod` m)) 0)
-      -- TODO: ^ is this a nonesense? check with curve fitting
-    matrix m n = (LA.><) m n . concat -- == LA.fromLists
+    jr = matrix m m . R.jacobian (\ r -> system (map (toN.toD) inputsL) r)
+    ji = matrix m n . R.jacobian (\ i -> system i (map toN results))
+
+    -- Same as above but also contains second derivatives
+    -- m x n = (∂o_𝑜/∂i_𝑖, ∂(∂o_𝑜/∂i_𝑖)/(∂o_[1..m] .. ∂i_[1..n]))
+    j :: S.M (Double, [Double])
+    j = R.jacobian' ift $ inputsD <> results
+    ift
+      :: Reifies s R.Tape
+      => [R.Reverse s Double] -> S.M (R.Reverse s Double)
+    ift adInputs =
+      let (is, rs) = splitAt n adInputs
+          x = tagged "i" is
+          y = tagged "g" rs
+          f = system x y
+          -- symbolic jacobian, immediately converted back to AD
+          fJ xs = unlift <$> S.jacobian f xs
+      in
+        -- compute jResultsInputs on AD values
+        S.matnegate (S.invert $ fJ y) `S.matmul` fJ x
+
     (LA.toList -> results, path) =
       nlFitting LevenbergMarquardtScaled
       1e-10 -- error
       1e-10 -- per-iteration change in the error to stop if the
             -- fitting error can no longer be improved
       100 -- max iterations
-      (\ (LA.toList -> x) -> LA.fromList $ system inputsD x)
-      (\ (LA.toList -> x) -> jrg x)
+      (LA.fromList . system inputsD . LA.toList)
+      (jr . LA.toList)
       (LA.fromList guessesD)
     inputsL = toList inputs
     inputsD = map toD inputsL
     guessesD = map toD $ toList guesses
     m = length guesses
     n = length inputs
+    me = m -- length $ system0 inputs guesses -- determine the number of equations
+    system is gs
+      | length es /= me = error $ "system returned " <> show (length es)
+        <> " equations instead of " <> show me
+      | otherwise = es
+      where es = system0 (replace is inputs) (replace gs guesses)
+    fmtP (Percent p)
+      | abs p < 5 && abs p > 0.0001 = printf "%9.5f%%" p
+      | otherwise = printf "%10.3e" (p/100)
+    fmtD = printf "%10.3g" -- 1.123e-197 is 10 characters
+    showDL = unwords . map fmtD
+    matrix m n = (LA.><) m n . concat -- == LA.fromLists
+    tagged prefix is =
+      zipWith (\ n v -> tag (prefix <> show n) $ lift v) [0..] is
 
 test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
        , dgda `pct` fdgda, dgdb `pct` fdgdb
@@ -1131,7 +1076,10 @@ plotMesh rows = do
     ,"unset colorbox"
 --     ,"set contour both"
     ,"set hidden3d"
-    ,"set pm3d depthorder border lc 'black' lw 0.33"
+--    ,"set term aqua enhanced 4"
+--     ,"set term pdfcairo linewidth 0.01"
+--     ,"set output \"output.pdf\""
+    ,"set pm3d depthorder border lc 'black' lw 0.2"
 --     ,concat ["splot [0:1] [0:20] [-0.1:1.1] \"", dat, "\" ",
     ,concat ["splot \"", dat, "\" ",
       -- "with lines palette lw 0.33"
@@ -1151,17 +1099,17 @@ linInterpolate x (g:gs) = go g gs
 -- увеличение nx желательно сопровождать увеличением nt
 
 fem :: forall a . N a => Market a -> a
-fem = fem' 200 100
+fem = fem' 100 100
 
 fem' :: forall a . N a => Int -> Int -> Market a -> a
 fem' nx nt market =
   trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toD σ) (toD rd) (toD rf) nx nt (toD $ iToSpot 0) (toD $ iToSpot (nx+1)) (toD (h 3)) :: String) $
   linInterpolate (log $ get Spot market) $
   (\ prices -> unsafePerformIO $ do
---       let toGraph = map (\(logSpot, v) -> (toD $ exp logSpot, toD v))
---       plotMesh
---           [map (\(x,v) -> (x, toD $ iToT t, v)) $ toGraph $ addLogSpot l
---           |(l,t) <- iterations]
+      let toGraph = map (\(logSpot, v) -> (toD $ exp logSpot, toD v))
+      plotMesh
+          [map (\(x,v) -> (x, toD $ iToT t, v)) $ toGraph $ addLogSpot l
+          |(l,t) <- iterations]
 
 --         foldMap
 --         (noTitle .
@@ -1255,7 +1203,9 @@ gradeSpot x
 --   | otherwise = 1 - 2*(1-x)^2
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
-main = print (localVol mkt 1.1 1 :: Double)
+main =
+  print $ zipWith pct greeksBumpLocalVol greeksADLocalVol
+--  print (localVol mkt 1.1 1 :: Double)
 _main = defaultMain
   [ bgroup "fem" (map benchFem [(100,100), (100,500), (500,100), (500,500)])
   , bgroup "integrated" (map benchIntegrated [1000, 10000, 100000, 1000000])

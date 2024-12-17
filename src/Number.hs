@@ -33,6 +33,13 @@ class (NFData a, Show a, Erf a, Ord a, StructuralOrd a) => N a where
 
   toD :: a -> Double
   toN :: Double -> a
+  dLevel :: a -> DLevel
+
+data DLevel
+  = DLNone  -- ^ can't be differentiated, 'explicitD' is no-op
+  | DL1st   -- ^ can have 1st order derivative, 'explicitD2' is no-op
+  | DLAny   -- ^ can have derivatives of any order
+  deriving (Eq, Ord, Show)
 
 intToN :: N a => Int -> a
 intToN = toN . toEnum
@@ -50,6 +57,7 @@ instance N Double where
   toN = id
   toD = id
   partials _ = []
+  dLevel _ = DLNone
 instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   exprType _ = "R.Reverse s (" <> exprType (undefined :: a) <> ")"
   step = J.lift1 step
@@ -63,6 +71,7 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   partials = map toD . R.partials
   toN = R.auto . toN
   toD = toD . R.primal
+  dLevel _ = DL1st
 
 -- | Specify an explicit derivative to a variable at the point
 -- Explicit derivative can be obtained numerically,
@@ -72,7 +81,16 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
 -- explicitD d x = 0
 -- @
 explicitD :: N a => a -> a -> Double -> a
-explicitD d x x0 = d * (x - toN x0)
+explicitD d x x0
+  | dLevel d >= DL1st = d * (x - toN x0)
+  | otherwise = 0
+{-# INLINE explicitD #-}
+
+explicitD2 :: N a => a -> a -> Double -> a -> Double -> a
+explicitD2 d x x0 y y0
+  | dLevel d >= DLAny = d * (x - toN x0) * (y - toN y0)
+  | otherwise = 0
+{-# INLINE explicitD2 #-}
 
 -- | Structural equality.
 -- @x == x^2@ for some @x@-es, but their derivatives are different
