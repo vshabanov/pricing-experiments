@@ -8,6 +8,7 @@ import Data.Char
 import Control.DeepSeq
 import Data.Number.Erf
 
+import Data.Kind
 import GHC.Generics
 import qualified Control.Monad.State.Strict as S
 import qualified Data.Map.Strict as Map
@@ -65,6 +66,7 @@ import Control.Concurrent.Async
 import Numeric.GSL.Fitting
 import Control.Comonad.Cofree
 
+import Data.MemoUgly
 import System.Process
 
 import Random
@@ -580,6 +582,34 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
         [delta Put  kp === -0.25
         ,delta Call kc ===  0.25]
 
+class Traversable t => FromList (t :: Type -> Type) where
+  fromList :: [a] -> t a
+
+instance FromList n => FromList (T n) where
+  fromList (a : n) = T a (fromList n)
+instance FromList T1 where
+  fromList [a] = T1 a
+instance FromList T2 where
+  fromList [a,b] = T2 a b
+instance FromList T3 where
+  fromList [a,b,c] = T3 a b c
+instance FromList T4 where
+  fromList [a,b,c,d] = T4 a b c d
+instance FromList T5 where
+  fromList [a,b,c,d,e] = T5 a b c d e
+instance FromList T6 where
+  fromList [a,b,c,d,e,f] = T6 a b c d e f
+instance FromList T7 where
+  fromList [a,b,c,d,e,f,g] = T7 a b c d e f g
+instance FromList T8 where
+  fromList [a,b,c,d,e,f,g,h] = T8 a b c d e f g h
+instance FromList T9 where
+  fromList [a,b,c,d,e,f,g,h,i] = T9 a b c d e f g h i
+instance FromList T10 where
+  fromList [a,b,c,d,e,f,g,h,i,j] = T10 a b c d e f g h i j
+instance FromList T11 where
+  fromList [a,b,c,d,e,f,g,h,i,j,k] = T11 a b c d e f g h i j k
+
 -- | Traversable cons @T var traversable@
 data T t a = T a (t a)
   deriving (Show, Functor, Foldable, Traversable)
@@ -790,21 +820,53 @@ fitTest = d2xda2Bump `seq` (Just d2xda2Bump, -- R.jacobian system is,
 replace :: Traversable t => [a] -> t b -> t a
 replace l t = S.evalState (mapM (const $ S.state (\ (x:xs) -> (x,xs))) t) l
 
+{-# INLINE fitSystemThrow1 #-}
 fitSystemThrow1
   :: (Traversable i, N a)
   => i a -- ^ n inputs
   -> a -- ^ guess
-  -> (forall a . N a => i a -> a -> a) -- ^ n inputs -> guess -> error
+  -> (forall a . N a => i a -> a -> a)
+     -- ^ n inputs -> guess -> (result, error)
   -> a -- ^ result with derivatives to inputs
-fitSystemThrow1 i g f = unT1 $ fitSystemThrow i (T1 g) (\ i (T1 g) -> [f i g])
+fitSystemThrow1 i g f =
+  unT1 $ fitSystemThrow i (T1 g) (\ i (T1 g) -> [f i g])
 
+{-# INLINE fitSystemThrow #-}
 fitSystemThrow
-  :: (Traversable i, Traversable r, N a, Show (r a))
+  :: (Traversable i, Traversable o, N a, Show a)
   => i a -- ^ n inputs
-  -> r a -- ^ m guesses
-  -> (forall a . N a => i a -> r a -> [a]) -- ^ n inputs -> m guesses -> me errors
-  -> r a -- ^ results with derivatives to inputs
-fitSystemThrow i g f = either error id $ fitSystem i g f
+  -> o a -- ^ m guesses
+  -> (forall a . N a => i a -> o a -> [a])
+     -- ^ n inputs -> m guesses -> (result, m errors)
+  -> o a -- ^ results with derivatives to inputs
+fitSystemThrow i o f =
+  either error (\ o' -> replace o' o)
+  $ fitSystem (toList i) (toList o)
+  $ \ ni no -> f (replace ni i) (replace no o)
+
+-- doesn't help
+{-# SPECIALIZE fitSystem
+     :: [Double]
+     -> [Double]
+     -> (forall a . N a => [a] -> [a] -> [a])
+     -> Either String [Double] #-}
+{-# SPECIALIZE fitSystem
+     :: [Expr Double]
+     -> [Expr Double]
+     -> (forall a . N a => [a] -> [a] -> [a])
+     -> Either String [Expr Double] #-}
+{-# SPECIALIZE fitSystem
+     :: Reifies s R.Tape
+     => [R.Reverse s Double]
+     -> [R.Reverse s Double]
+     -> (forall a . N a => [a] -> [a] -> [a])
+     -> Either String [R.Reverse s Double] #-}
+{-# SPECIALIZE fitSystem
+     :: Reifies s R.Tape
+     => [Expr (R.Reverse s Double)]
+     -> [Expr (R.Reverse s Double)]
+     -> (forall a . N a => [a] -> [a] -> [a])
+     -> Either String [Expr (R.Reverse s Double)] #-}
 
 -- | Solve a system of non-linear equations for a set of inputs.
 --
@@ -817,15 +879,13 @@ fitSystemThrow i g f = either error id $ fitSystem i g f
 -- Can be used to plug a model parameters calibration
 -- (m parameters -> m equations = 0) into an AD framework.
 fitSystem
-  :: (Traversable i, Functor i, Traversable r, Functor r, N a, Show (r a))
-  => i a -- ^ n inputs
-  -> r a -- ^ m guesses
-  -> (forall a . N a => i a -> r a -> [a]) -- ^ n inputs -> m guesses -> m errors
-  -> Either String (r a) -- ^ results with derivatives to inputs
+  :: N a
+  => [a] -- ^ n inputs
+  -> [a] -- ^ m guesses
+  -> (forall a . N a => [a] -> [a] -> [a])
+     -- ^ n inputs -> m guesses -> m errors
+  -> Either String [a] -- ^ results with derivatives to inputs
 fitSystem inputs guesses system0
-  | me /= m = error $ mconcat
-    ["Number of equations (", show me, ") must match the number of variables ("
-    , show m, ")"]
   | err > 1e-10 = -- Sum of squared residuals (sum . map (^2))
     -- if there's a big error, there's a big chance that
     --  * LA.inv will fail with a singular matrix
@@ -843,21 +903,21 @@ fitSystem inputs guesses system0
     nIterations err
     (unlines $
      zipWith (\ i e -> printf "    %2d %10.7f%%" (i::Int) (e*100))
-       [0..] $ system inputsD lastGuesses)
+       [0..] $ map fst $ jrMemo lastGuesses)
     (showDL inputsD) (showDL guessesD) (showDL lastGuesses)
     (unwords $ map fmtP $ zipWith pct lastGuesses guessesD)
   | otherwise =
 --   trace (show path) $
 --   map realToFrac results
-  trace (printf "%s %d x %d" (exprType $ head $ toList inputs) m n) $
-  Right $ flip replace guesses $
+--  trace (printf "%s %d x %d" (exprType proxy) m n) $
+  Right $
     case dLevel proxy of
       DLNone -> map toN results
       DL1st  -> resultsWith1stDerivatives
       DLAny  -> resultsWith2ndDerivatives
 --       trace (show (jr results, "inv", LA.inv (jr results), guesses, inputsD, results, ji inputsD, LA.dispf 3 jResultsInputs)) $
   where
-    proxy = head $ toList inputs
+    (proxy:_) = toList inputs
     (nIterations:err:lastGuesses) = LA.toList $ last $ LA.toRows path
     -- numerically computed 1st order derivatives,
     -- fast, but AD won't work if the result is symbolically differentiated
@@ -865,8 +925,8 @@ fitSystem inputs guesses system0
     resultsWith1stDerivatives =
       zipWith (\ r dis ->
         toN r + sum
-        [explicitD (toN d) i (toD i)
-        |(d,i) <- zip (LA.toList dis) inputsL, d /= 0])
+        [explicitD (toN d) i id
+        |(d,(i,id)) <- zip (LA.toList dis) inputsND, d /= 0])
       results
       (LA.toRows jResultsInputs)
     -- mixed symbolic-AD computed 2nd-order derivatives
@@ -875,32 +935,39 @@ fitSystem inputs guesses system0
       [toN r
        -- 1st order
        + sum
-         [explicitD (toN d) i (toD i)
-         |(ii, i) <- zip [0..] inputsL, let (d,_) = j S.!. (io,ii), d /= 0]
+         [explicitD (toN d) i id
+         |(ii, (i, id)) <- zip [0..] inputsND, let (d,_) = j S.!. (io,ii), d /= 0]
        -- 2nd order
        + sum
          [-- trace (printf "∂²o%d/∂i%d∂i%d = %f" io ix iy d) $
-          explicitD2 (toN (d/2)) x (toD x) y (toD y)
-         |(ix, x) <- zip [0..] inputsL
-         ,(iy, y) <- zip [0..] inputsL
+          explicitD2 (toN (if x == y then d/2 else d)) x xd y yd
+         |(ix, (x, xd)) <- zip [0..] inputsND
+         ,(iy, (y, yd)) <- drop ix $ zip [0..] inputsND
          ,let (_dodx, splitAt n -> (dis,dos)) = j S.!. (io,ix)
          ,let d = sum $ [dis !! iy] <> [dos !! v * fst (j S.!. (v,iy)) | v <- [0..m-1]]
          ,d /= 0]
       |(io, r) <- zip [0..] results]
+
     -- Jacobian of results to inputs via the implicit function theorem
     -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
     jResultsInputs = (- (LA.inv $ jr results)) <> ji inputsD
-    jr = matrix m m . R.jacobian (\ r -> system (map (toN.toD) inputsL) r)
+    jr = matrix m m . map snd . jrMemo
     ji = matrix m n . R.jacobian (\ i -> system i (map toN results))
 
-    -- Same as above but also contains second derivatives
-    -- m x n = (∂o_𝑜/∂i_𝑖, ∂(∂o_𝑜/∂i_𝑖)/(∂o_[1..m] .. ∂i_[1..n]))
-    j :: S.M (Double, [Double])
-    j = R.jacobian' ift $ inputsD <> results
+    jrMemo :: [Double] -> [(Double, [Double])]
+    jrMemo = memo $ R.jacobian' (\ r -> system (map toN inputsD) r)
+
+    -- Same as above but also contains second order derivatives
+    -- m x n = (∂o_𝑜/∂i_𝑖, (∂(∂o_𝑜/∂i_𝑖)/∂i_[1..n], ∂(∂o_𝑜/∂i_𝑖)/∂o_[1..m]))
+--    j :: S.M (Double, (Array Int Double, Array Int Double))
+    j = R.jacobian' ift (inputsD <> results)
+--    splitdido (dodi, splitAt n -> (dis,dos)) = (dodi, (dis,dos))
+--      (dodi, (listArray (0,n-1) dis, listArray (0,m-1) dos))
     ift
       :: Reifies s R.Tape
       => [R.Reverse s Double] -> S.M (R.Reverse s Double)
-    ift adInputs =
+    ift adInputs = -- ~60% of the time, mostly diff
+                   -- 40% partials (from 'j')
       let (is, rs) = splitAt n adInputs
           x = tagged "i" is
           y = tagged "g" rs
@@ -908,6 +975,7 @@ fitSystem inputs guesses system0
           -- symbolic jacobian, immediately converted back to AD
           fJ xs = unlift <$> S.jacobian f xs
       in
+--        trace (show (map (length . showExprWithSharing) f, show . showExprWithSharing <$> S.jacobian f y)) $
         -- compute jResultsInputs on AD values
         S.matnegate (S.invert $ fJ y) `S.matmul` fJ x
 
@@ -917,18 +985,17 @@ fitSystem inputs guesses system0
       1e-10 -- per-iteration change in the error to stop if the
             -- fitting error can no longer be improved
       100 -- max iterations
-      (LA.fromList . system inputsD . LA.toList)
+      (LA.fromList . map fst . jrMemo . LA.toList)
       (jr . LA.toList)
       (LA.fromList guessesD)
-    inputsL = toList inputs
-    inputsD = map toD inputsL
-    guessesD = map toD $ toList guesses
+    inputsD = map toD inputs
+    inputsND = zip inputs inputsD
+    guessesD = map toD guesses
     m = length guesses
     n = length inputs
-    me = m -- length $ system0 inputs guesses -- determine the number of equations
     system is gs
-      | length es /= me = error $ "system returned " <> show (length es)
-        <> " equations instead of " <> show me
+      | length es /= m = error $ "system returned " <> show (length es)
+        <> " equations instead of " <> show m
       | otherwise = es
       where es = system0 (replace is inputs) (replace gs guesses)
     fmtP (Percent p)

@@ -42,7 +42,12 @@ matrix m n l
   | (bad:_) <- filter ((/= n) . length) l =
     error $ printf "matrix %d %d: row of size %d provided %s" m n (length bad)
   | otherwise =
-    M $ listArray ((0,0), (m-1,n-1)) $ concat l
+    M $ listArray ((0,0), (m-1,n-1)) $ forceList $ concat l
+
+forceList l = go l
+  where
+    go [] = l
+    go (x:xs) = x `seq` go xs
 
 testMatrix :: Int -> Int -> M (Expr a)
 testMatrix m n = matrix m n

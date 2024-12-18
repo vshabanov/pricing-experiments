@@ -38,6 +38,7 @@ common common
     splitmix,
     text >= 1.2.4.1,
     unordered-containers >= 0.2.13.0,
+    uglymemo,
     vector,
   default-language:
     GHC2021
