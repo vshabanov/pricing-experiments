@@ -480,6 +480,25 @@ volSens f = putStrLn $ unlines
   ,let d = dvdx' (\ m () -> f m) mkt () v 0.000001
   ]
 
+smileAtT :: N a => [VolTableRow Tenor a] -> Rates a -> a -> Smile a
+smileAtT surface rates = flip smile rates . volTableRow surface
+-- bumping works, but it's only 6-7 times faster than the full AD version.
+-- smileAtT surface rates t =
+-- --  trace (printf "smileAtT %f" (toD t)) $
+--   s0 { smileLocalVol = \ s ->
+--          (smileImpliedVol sUp s - smileImpliedVol sDown s)/(2*h) }
+--   where
+--     sm tx = smile (mapTenor unlift $ fmap unlift $ volTableRow surface tx) rates
+--     s0 = sm t
+--     sDown = sm (t-h)
+--     sUp   = sm (t+h)
+--     h = 0.0001
+
+mapTenor :: (a -> b) -> VolTableRow a c -> VolTableRow b c
+mapTenor f v@VolTableRow{t} = v { t = f t }
+
+-- smile :: N a => VolTableRow a a -> Rates a -> Smile a
+-- smile v@VolTableRow{t,σatm,σbf25,σrr25} rates@Rates{s,rf,rd} =
 smile :: N a => VolTableRow (Expr a) (Expr a) -> Rates a -> Smile a
 smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
 --   trace (unlines $
@@ -706,9 +725,6 @@ infix 4 === -- same as ==
 
 x === y = (x - y)/y  -- /y may cause division by zero
 
-smileAtT :: N a => [VolTableRow Tenor a] -> Rates a -> a -> Smile a
-smileAtT surface rates = flip smile rates . volTableRow surface
-
 -- | variable for 't'
 tagVolT = tag "volT"
 
@@ -792,12 +808,31 @@ m inp f = modify inp f mkt
 --solvePriceToVol price = solve (\ x -> p (modify ImpliedVol (const $ const x) mkt) PV - price)
 
 --fitTest :: [(Double, [Double])]
-fitTest :: N a => (Maybe a, [a])
-fitTest = d2xda2Bump `seq` (Just d2xda2Bump, -- R.jacobian system is,
-           system is)
+fitTest :: N a => (Maybe a, [[Double]]) -- [[(String, Double)]])
+fitTest = d2xda2Bump `seq` (Just d2xda2Bump,
+--            R.jacobian system is
+  R.jacobian (\ [a,b] ->
+    map (unlift . flip diff "a") (system [tag "a" (lift a), tag "b" (lift b)]))
+    is
+--   [[toD $ diff (diff x "a") i | i <- ["a", "b"]]
+--   |x <- system [tag "a" a, tag "b" b] :: [Expr Double]
+--   ]
+--   [[("da2", bumpDiff2 (\ x -> system [a+x,b] !! o) 0 h)
+--    ,("dadb", bumpDiffMixed (\ x y -> system [a+x,b+y] !! o) 0 0 h)
+--    ,("db2", bumpDiff2 (\ x -> system [a,b+x] !! o) 0 h)]
+--   | o <- [0,1]]
+                           )
+
   where
-    d2xda2Bump = bumpDiff2 (\ x -> system [a,b+x] !! 1) 0 0.00001
-    is@[a,b] = [0.2, 0.2]
+    h = 0.000001
+--    d2xda2Bump = bumpDiffMixed (\ x y -> system [a+x,b+y] !! 1) 0 0 0.000001
+    d2xda2Bump = bumpDiff2 (\ x -> system [a,b+x] !! 0) 0 0.00001
+    a,b :: N a => a
+    a = 0.2
+    b = 0.2
+    is :: N a => [a]
+    is = [a, b]
+    system :: N a => [a] -> [a]
     system inputs =
       (\ [a,b] -> fitSystemThrow [a,b] [0.5,0.5] $ \ [a,b] [x,y] ->
       [  sin (exp a)^3 + sin b - x^2 - 1
@@ -843,30 +878,6 @@ fitSystemThrow i o f =
   either error (\ o' -> replace o' o)
   $ fitSystem (toList i) (toList o)
   $ \ ni no -> f (replace ni i) (replace no o)
-
--- doesn't help
-{-# SPECIALIZE fitSystem
-     :: [Double]
-     -> [Double]
-     -> (forall a . N a => [a] -> [a] -> [a])
-     -> Either String [Double] #-}
-{-# SPECIALIZE fitSystem
-     :: [Expr Double]
-     -> [Expr Double]
-     -> (forall a . N a => [a] -> [a] -> [a])
-     -> Either String [Expr Double] #-}
-{-# SPECIALIZE fitSystem
-     :: Reifies s R.Tape
-     => [R.Reverse s Double]
-     -> [R.Reverse s Double]
-     -> (forall a . N a => [a] -> [a] -> [a])
-     -> Either String [R.Reverse s Double] #-}
-{-# SPECIALIZE fitSystem
-     :: Reifies s R.Tape
-     => [Expr (R.Reverse s Double)]
-     -> [Expr (R.Reverse s Double)]
-     -> (forall a . N a => [a] -> [a] -> [a])
-     -> Either String [Expr (R.Reverse s Double)] #-}
 
 -- | Solve a system of non-linear equations for a set of inputs.
 --
@@ -924,28 +935,28 @@ fitSystem inputs guesses system0
     -- (as there are no 2nd-order derivatives)
     resultsWith1stDerivatives =
       zipWith (\ r dis ->
-        toN r + sum
-        [explicitD (toN d) i id
-        |(d,(i,id)) <- zip (LA.toList dis) inputsND, d /= 0])
+        explicitD
+          (map (first toN) $ filter ((/= 0) . fst) $ zip (LA.toList dis) inputs)
+          [] -- no hessian
+          (toN r))
       results
       (LA.toRows jResultsInputs)
     -- mixed symbolic-AD computed 2nd-order derivatives
     -- very slow, but 'diff' of the result produces correct AD derivatives
     resultsWith2ndDerivatives =
-      [toN r
+      [explicitD
        -- 1st order
-       + sum
-         [explicitD (toN d) i id
-         |(ii, (i, id)) <- zip [0..] inputsND, let (d,_) = j S.!. (io,ii), d /= 0]
+       [(toN d, i)|(ii, i) <- zip [0..] inputs, let (d,_) = j S.!. (io,ii), d /= 0]
        -- 2nd order
-       + sum
-         [-- trace (printf "∂²o%d/∂i%d∂i%d = %f" io ix iy d) $
-          explicitD2 (toN (if x == y then d/2 else d)) x xd y yd
-         |(ix, (x, xd)) <- zip [0..] inputsND
-         ,(iy, (y, yd)) <- drop ix $ zip [0..] inputsND
-         ,let (_dodx, splitAt n -> (dis,dos)) = j S.!. (io,ix)
-         ,let d = sum $ [dis !! iy] <> [dos !! v * fst (j S.!. (v,iy)) | v <- [0..m-1]]
-         ,d /= 0]
+       [-- trace (printf "∂²o%d/∂i%d∂i%d = %f" io ix iy d) $
+        (toN (if ix == iy then d/2 else d), x, y)
+       |(ix, x) <- zip [0..] inputs
+       ,(iy, y) <- drop ix $ zip [0..] inputs
+       ,let (_dodx, splitAt n -> (dis,dos)) = j S.!. (io,ix)
+       ,let d = sum $ [dis !! iy] <> [dos !! v * fst (j S.!. (v,iy)) | v <- [0..m-1]]
+       ,d /= 0]
+       -- result
+       (toN r)
       |(io, r) <- zip [0..] results]
 
     -- Jacobian of results to inputs via the implicit function theorem
@@ -989,7 +1000,6 @@ fitSystem inputs guesses system0
       (jr . LA.toList)
       (LA.fromList guessesD)
     inputsD = map toD inputs
-    inputsND = zip inputs inputsD
     guessesD = map toD guesses
     m = length guesses
     n = length inputs
@@ -1066,6 +1076,8 @@ symd f x part bump = (f (x+part*bump) - f (x-part*bump)) / (2*bump)
 
 bumpDiff f x bump = (f (x+bump) - f (x-bump)) / (2*bump)
 bumpDiff2 f x bump = bumpDiff (\ x -> bumpDiff f x bump) x bump
+bumpDiffMixed f x y h =
+  bumpDiff (\ x -> bumpDiff (\ y -> f x y) y h) x h
 dvdxUp :: N n => (Market n -> a -> n) -> Market n -> a -> Get n n -> n -> n
 dvdxUp p mkt what x (bump :: n) =
   (p (modify x (+bump) mkt) what - p mkt what) / bump

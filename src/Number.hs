@@ -33,11 +33,18 @@ class (NFData a, Show a, Erf a, Ord a, StructuralOrd a) => N a where
 
   toD :: a -> Double
   toN :: Double -> a
+
+  explicitD
+    :: [(a, a)]    -- ^ jacobian [(∂x/∂var, var)]
+    -> [(a, a, a)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
+    -> a
+    -> a
+
   dLevel :: a -> DLevel
 
 data DLevel
   = DLNone  -- ^ can't be differentiated, 'explicitD' is no-op
-  | DL1st   -- ^ can have 1st order derivative, 'explicitD2' is no-op
+  | DL1st   -- ^ can have 1st order derivative, 'explicitD' only honors jacobian
   | DLAny   -- ^ can have derivatives of any order
   deriving (Eq, Ord, Show)
 
@@ -57,6 +64,7 @@ instance N Double where
   toN = id
   toD = id
   partials _ = []
+  explicitD _ _ = id
   dLevel _ = DLNone
 instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   exprType _ = "R.Reverse s (" <> exprType (undefined :: a) <> ")"
@@ -67,30 +75,15 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
     (\ x -> k / (exp (k*x) + exp (-k*x) + 2))
   -- no NaN this way, but error grows for width<0.1, and breaks at 0.0003
 -- 1000 / (exp 1000 + exp (-1000) + 2)
---   explicitD d = J.lift1 (const 0) (const $ R.auto $ R.primal d)
+  explicitD jacobian _hessian base =
+    base
+    +
+    sum [J.lift1 (const 0) (const $ R.auto (R.primal d)) var
+        | (d, var) <- jacobian]
   partials = map toD . R.partials
   toN = R.auto . toN
   toD = toD . R.primal
   dLevel _ = DL1st
-
--- | Specify an explicit derivative to a variable at the point
--- Explicit derivative can be obtained numerically,
--- e.g. via an implicit function theorem.
--- @
--- diff (explicitD d x) = d * diff x
--- explicitD d x = 0
--- @
-explicitD :: N a => a -> a -> Double -> a
-explicitD d x x0
-  | dLevel d >= DL1st = d * (x - toN x0)
-  | otherwise = 0
-{-# INLINE explicitD #-}
-
-explicitD2 :: N a => a -> a -> Double -> a -> Double -> a
-explicitD2 d x x0 y y0
-  | dLevel d >= DLAny = d * (x - toN x0) * (y - toN y0)
-  | otherwise = 0
-{-# INLINE explicitD2 #-}
 
 -- | Structural equality.
 -- @x == x^2@ for some @x@-es, but their derivatives are different
@@ -121,6 +114,11 @@ instance StructuralOrd Double where
   structuralCompare = compare
 instance StructuralEq a => StructuralEq [a] where
   structuralEq a b = map SCmp a == map SCmp b
+instance (StructuralEq a, StructuralEq b) => StructuralEq (a,b) where
+  structuralEq (a1,a2) (b1,b2) = structuralEq a1 b1 && structuralEq a2 b2
+instance (StructuralEq a, StructuralEq b, StructuralEq c) => StructuralEq (a,b,c) where
+  structuralEq (a1,a2,a3) (b1,b2,b3) =
+    structuralEq a1 b1 && structuralEq a2 b2 && structuralEq a3 b3
 
 instance StructuralEq a => StructuralEq (R.Reverse s a) where
   structuralEq a b = case (a, b) of
