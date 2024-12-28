@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedLists, DeriveAnyClass, TemplateHaskell, MultiWayIf #-}
-{-# OPTIONS_GHC -Wincomplete-patterns #-}
+{-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 -- | Symbolic differentiation
 module Symbolic
   ( Expr
@@ -759,13 +759,14 @@ parensIf needParens (unwords -> x)
 debugShowExpr :: N a => Expr a -> String
 debugShowExpr = \ case
   Var i n -> unwords ["Var", show i, show n]
-  Tag i m t e -> unwords ["Tag", show i, show m, show t, go e]
+  Tag i m t e -> unwords ["Tag", show i, sm m, show t, go e]
   Const a -> mconcat ["Const (", show a, ")"]
-  BinOp i m op a b -> unwords ["BinOp", show i, show m, show op, go a, go b]
-  UnOp i m op a -> unwords ["UnOp", show i, show m, show op, go a]
-  ExplicitD i m j h a -> unwords ["ExplicitD", show i, show m, "TODO ExplicitD"] -- show op, go a]
+  BinOp i m op a b -> unwords ["BinOp", show i, sm m, show op, go a, go b]
+  UnOp i m op a -> unwords ["UnOp", show i, sm m, show op, go a]
+  ExplicitD i m j h a -> unwords ["ExplicitD", show i, sm m, "TODO ExplicitD"] -- show op, go a]
   where
     go x = mconcat ["(", debugShowExpr x, ")"]
+    sm x = showsPrec 10 x ""
 
 showBinOp = \ case
   Plus      -> "+"
@@ -898,24 +899,23 @@ testEval x = eval (\ v -> fromJust $ lookup v testVars) x
 substTest x = eval (\ v -> toN $ fromJust $ lookup v testVars) x
 
 genExpr :: (Expr Double -> Bool) -> [(String, Double)] -> Gen (Expr Double)
-genExpr goodExpr vars = filterGen goodExpr $ oneof
-  [var <$> elements (map fst vars)
-  ,Const <$> arbitrary
-  ,tag <$> elements ["i","j","k"] <*> g
-  ,mkBinOp <$> arbitrary <*> g <*> g
-  ,mkUnOp  <$> filterGen diffUnOp arbitrary <*> g
-  ]
+genExpr goodExpr vars = g `suchThat` goodExpr
   where
-    g = genExpr goodExpr vars
+    -- need to check every subexpression, otherwise we can build
+    -- non-NaN from NaNs (1**NaN = 1), or build non-jittery computations
+    -- from jittery ones and it will break differentiation
+    g = (`suchThat` goodSimplifyExpr) $ oneof
+      [var . fst <$> elements vars
+      ,Const <$> arbitrary
+      ,tag <$> elements ["i","j","k"] <*> g
+      ,mkBinOp <$> arbitrary <*> g <*> g
+      ,mkUnOp  <$> suchThat arbitrary diffUnOp <*> g
+      -- don't generate explicitD at all?
+      ]
     diffUnOp = \ case
       Abs -> False
       Signum -> False
       _ -> True
-
-filterGen :: Monad m => (a -> Bool) -> m a -> m a
-filterGen pred gen = do
-  r <- gen
-  if pred r then pure r else filterGen pred gen
 
 goodSimplifyExpr :: Expr Double -> Bool
 goodSimplifyExpr expr = ok (e expr) && case expr of
@@ -945,7 +945,7 @@ goodSimplifyExpr expr = ok (e expr) && case expr of
 newtype TestDiffExpr = TestDiffExpr (Expr Double) deriving Show
 instance Arbitrary TestDiffExpr where
   arbitrary = TestDiffExpr <$>
-    filterGen goodDiffExpr (genExpr goodSimplifyExpr testVars)
+    genExpr (\ e -> goodSimplifyExpr e && goodDiffExpr e) testVars
 
 newtype TestSimplifyExpr = TestSimplifyExpr (Expr Double) deriving Show
 instance Arbitrary TestSimplifyExpr where
@@ -963,7 +963,7 @@ numDiff' bump e = (eb bump - eb (-bump)) / (2*bump)
     eb b = eval (\ case "x" -> x+b; v -> fromJust $ lookup v testVars) e
     x = testEval "x"
 
-_prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
+prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
   where
     debug = unlines
       ["Debug Expr:"
@@ -979,8 +979,8 @@ _prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
     n = numDiff e
     s = testEval ds
 
-_prop_parse :: Expr Double -> Property
-_prop_parse x = counterexample debug $ e `structuralEq` parseExpr (show e)
+prop_parse :: Expr Double -> Property
+prop_parse x = counterexample debug $ e `structuralEq` parseExpr (show e)
   where
     debug = unlines
       ["Debug Expr:"
