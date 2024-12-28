@@ -1,6 +1,7 @@
-{-# OPTIONS_GHC -Wincomplete-patterns #-}
+{-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 module Number where
 
+import Data.Array
 import Control.DeepSeq
 import Data.Number.Erf
 import Data.Reflection
@@ -35,9 +36,10 @@ class (NFData a, Show a, Erf a, Ord a, StructuralOrd a) => N a where
   toN :: Double -> a
 
   explicitD
-    :: [(a, a)]    -- ^ jacobian [(∂x/∂var, var)]
-    -> [(a, a, a)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
-    -> a
+    :: [a]             -- ^ variables
+    -> [(a, Int)]      -- ^ jacobian [(∂x/∂var, var)]
+    -> [(a, Int, Int)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
+    -> a               -- ^ value
     -> a
 
   dLevel :: a -> DLevel
@@ -64,7 +66,7 @@ instance N Double where
   toN = id
   toD = id
   partials _ = []
-  explicitD _ _ = id
+  explicitD _ _ _ = id
   dLevel _ = DLNone
 instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   exprType _ = "R.Reverse s (" <> exprType (undefined :: a) <> ")"
@@ -75,11 +77,13 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
     (\ x -> k / (exp (k*x) + exp (-k*x) + 2))
   -- no NaN this way, but error grows for width<0.1, and breaks at 0.0003
 -- 1000 / (exp 1000 + exp (-1000) + 2)
-  explicitD jacobian _hessian base =
+  explicitD vars jacobian _hessian base =
     base
     +
-    sum [J.lift1 (const 0) (const $ R.auto (R.primal d)) var
+    sum [J.lift1 (const 0) (const $ R.auto (R.primal d)) (va ! var)
         | (d, var) <- jacobian]
+    where
+      va = listArray (0, length vars-1) vars
   partials = map toD . R.partials
   toN = R.auto . toN
   toD = toD . R.primal
@@ -107,6 +111,10 @@ instance StructuralOrd a => Ord (SCmp a) where
 instance StructuralEq Integer where
   structuralEq = (==)
 instance StructuralOrd Integer where
+  structuralCompare = compare
+instance StructuralEq Int where
+  structuralEq = (==)
+instance StructuralOrd Int where
   structuralCompare = compare
 instance StructuralEq Double where
   structuralEq = (==)

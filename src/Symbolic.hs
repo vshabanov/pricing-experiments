@@ -76,8 +76,9 @@ data Expr a
   | BinOp !I !(Maybe a) !BinOp (Expr a) (Expr a)
   | UnOp !I !(Maybe a) !UnOp (Expr a)
   | ExplicitD !I !(Maybe a)
-    [(Expr a, Expr a)] -- ^ jacobian [(∂x/∂var, var)]
-    [(Expr a, Expr a, Expr a)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
+    [Expr a]             -- ^ variables
+    [(Expr a, Int)]      -- ^ jacobian [(∂x/∂var, var)]
+    [(Expr a, Int, Int)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
     (Expr a)
   deriving (Generic, NFData)
 
@@ -135,7 +136,7 @@ evalMaybe = \ case
   Const a -> Just a
   BinOp _ m _ _ _ -> m
   UnOp _ m _ _ -> m
-  ExplicitD _ m _ _ _ -> m
+  ExplicitD _ m _ _ _ _ -> m
 
 eval :: N a => (VarId -> a) -> Expr a -> a
 eval subst expr = S.evalState (go expr) IntMap.empty
@@ -149,12 +150,13 @@ eval subst expr = S.evalState (go expr) IntMap.empty
       BinOp i _ op a b -> m i $ liftM2 (binOp op) (go a) (go b)
       UnOp i (Just x) _ _ -> pure x
       UnOp i _ op a -> m i $ unOp op <$> go a
-      ExplicitD i (Just x) _ _ _ -> pure x
-      ExplicitD i _ j h a -> m i $ do
-        eh <- for h $ \ (d,v1,v2) -> liftM3 (,,) (go d) (go v1) (go v2)
-        ej <- for j $ \ (d,v) -> liftM2 (,) (go d) (go v)
+      ExplicitD i (Just x) _ _ _ _ -> pure x
+      ExplicitD i _ v j h a -> m i $ do
+        ev <- for v go
+        eh <- for h $ \ (d,v1,v2) -> (,v1,v2) <$> go d
+        ej <- for j $ \ (d,v) -> (,v) <$> go d
         ea <- go a
-        pure $ explicitD ej eh ea
+        pure $ explicitD ev ej eh ea
 
 m :: Int -> S.State (IntMap a) a -> S.State (IntMap a) a
 m i act = do
@@ -234,30 +236,29 @@ diffVar expr by = S.evalState (d expr) IntMap.empty
       UnOp i _ op a -> m i $ do
         !a' <- d a
         pure $! dUnOp op a * a'
-      ExplicitD i _ jacobian hessian _ -> m i $ do
-        a <- fmap sum $ for jacobian $ \ (dv,v) -> do
-          !v' <- d v
-          pure $ dv*v'
-        j <- fmap concat $ for hessian $ \ (dv12,v1,v2) -> do
-          let e = toN . toD -- maybe (error "foo") (toN . toD) . evalMaybe
-          !v1' <- d v1
-          !v2' <- d v2
---           pure $ [(dv12*v1', v2) | SCmp v1' /= 0]
---               <> [(dv12*v2', v1) | SCmp v2' /= 0]
-          --  ^ slightly faster, though not sure it's correct to move
-          --    v12' to coefficient parts
-          let v' = v1' * (v2 - e v2) + v2' * (v1 - e v1)
-          -- The inlined version is considerably faster,
-          -- probably because of 'e' is not even called most of the time.
-          -- Without inlining the performace of 'explicitD'
-          -- is a bit slower than just specifying
-          --   dab*(a-toN (toD a))*(b-toN (toD b))
-          -- directly without any 'ExplicitD' primitive.
---           !v' <- d ((v1-e v1)*(v2 - e v2))
-          pure $ if
-            | SCmp v' == 0 -> []
-            | otherwise    -> [(dv12, v')]
-        pure $ if null j then a else explicitD j [] a
+      ExplicitD i _ vars jacobian hessian _ -> m i $ do
+        -- A separate variables list doesn't speed things up
+        -- as we already cache evaluation and differentiation,
+        -- but it helps with debugging as we can just check indices
+        -- and don't look into repeated variables.
+        -- It also simplifies usage a bit as we don't need to copy
+        -- inputs everywhere.
+        let vmes = arr [v - e v | v <- vars]
+            e = toN . toD -- maybe (error "foo") (toN . toD) . evalMaybe
+            arr xs = listArray (0, length vars-1) xs
+        dvs <- arr <$> mapM d vars
+        let a = sum [dv * dvs!v | (dv,v) <- jacobian]
+            j = flip concatMap hessian $ \ (dv12,v1,v2) ->
+               -- the inlined version of
+               --   v' <- d ((v1-e v1)*(v2 - e v2))
+               -- ==>
+               --   v' = v1' * (v2 - e v2) + v2' * (v1 - e v1)
+               let v' = dvs!v1 * vmes!v2 + dvs!v2 * vmes!v1
+               in
+                 if | SCmp v' == 0 -> []
+                    | otherwise    -> [(dv12, v')]
+        pure $ if null j then a else
+          explicitD (map snd j) (zip (map fst j) [0..]) [] a
     binOp op a b = do
       !a' <- d a
       !b' <- d b
@@ -323,18 +324,16 @@ cse e = snd $ S.evalState (go e) (Map.empty, IntMap.empty)
       UnOp i _ op a -> m i $ do
         (ca, sa) <- go a
         get (CUnOp op ca) (mkUnOp op sa)
-      ExplicitD i _ j h a -> m i $ do
+      ExplicitD i _ v j h a -> m i $ do
+        (cv, sv) <- unzip <$> mapM go v
         (ca, sa) <- go a
         (cj, sj) <- fmap unzip $ for j $ \ (d,v) -> do
           (cd, sd) <- go d
-          (cv, sv) <- go v
-          pure ((cd,cv), (sd,sv))
+          pure ((cd,v), (sd,v))
         (ch, sh) <- fmap unzip $ for h $ \ (d,v1,v2) -> do
           (cd, sd) <- go d
-          (cv1, sv1) <- go v1
-          (cv2, sv2) <- go v2
-          pure ((cd,cv1,cv2), (sd,sv1,sv2))
-        get (CExplicitD cj ch ca) (explicitD sj sh sa)
+          pure ((cd,v1,v2), (sd,v1,v2))
+        get (CExplicitD cv cj ch ca) (explicitD sv sj sh sa)
     get cexpr mkexpr = do
       (m,im) <- S.get
       case Map.lookup cexpr m of
@@ -358,7 +357,7 @@ data CExpr a
   | CConst (SCmp a)
   | CBinOp BinOp (CExpr a) (CExpr a)
   | CUnOp UnOp (CExpr a)
-  | CExplicitD [(CExpr a, CExpr a)] [(CExpr a, CExpr a, CExpr a)] (CExpr a)
+  | CExplicitD [CExpr a] [(CExpr a, Int)] [(CExpr a, Int, Int)] (CExpr a)
   deriving (Eq, Ord, Show)
 
 toCExpr = \ case
@@ -367,11 +366,12 @@ toCExpr = \ case
   Const c -> CConst $ SCmp c
   BinOp _ _ op a b -> CBinOp op (toCExpr a) (toCExpr b)
   UnOp _ _ op a -> CUnOp op (toCExpr a)
-  ExplicitD _ _ j h a -> mapExplicitD CExplicitD toCExpr j h a
+  ExplicitD _ _ v j h a -> mapExplicitD CExplicitD toCExpr v j h a
 
-mapExplicitD c f j h a = c
-  [(f d, f v) | (d,v) <- j]
-  [(f d, f v1, f v2) | (d,v1,v2) <- h]
+mapExplicitD c f v j h a = c
+  (map f v)
+  [(f d, v) | (d,v) <- j]
+  [(f d, v1, v2) | (d,v1,v2) <- h]
   (f a)
 
 ------------------------------------------------------------------------------
@@ -396,7 +396,7 @@ data FExpr a
     -- ^ c0 + expr1*c1 + expr2*c2 ...
   | FProduct (SCmp a) (Map (FExpr a) Integer)
     -- ^ c0 * expr1^c1 * expr2^c2 ...
-  | FExplicitD [(FExpr a, FExpr a)] [(FExpr a, FExpr a, FExpr a)] (FExpr a)
+  | FExplicitD [FExpr a] [(FExpr a, Int)] [(FExpr a, Int, Int)] (FExpr a)
   deriving (Eq, Ord)
 
 fsimp :: (StructuralOrd a, N a) => FExpr a -> FExpr a
@@ -482,7 +482,7 @@ fexpand = \ case
   FUnOp op x -> unOp op $ e x
   FVar i -> var i
   FTag i x -> tag i (e x)
-  FExplicitD j h x -> mapExplicitD explicitD e j h x
+  FExplicitD v j h x -> mapExplicitD explicitD e v j h x
   where
     -- put negative constants last to have more a-b and a/b
     -- instead of -1*b+a and 1/b*a
@@ -529,7 +529,7 @@ factor = \ case
       Divide    -> FProduct 1 $ m 1 (-1)
       Expt      -> FExpt (factor a) (factor b)
   UnOp _ _ op e -> FUnOp op $ factor e
-  ExplicitD _ _ j h e -> mapExplicitD FExplicitD factor j h e
+  ExplicitD _ _ v j h e -> mapExplicitD FExplicitD factor v j h e
 
 ------------------------------------------------------------------------------
 -- Instances
@@ -559,8 +559,9 @@ instance StructuralEq a => StructuralEq (Expr a) where
       oa == ob && structuralEq a1 b1 && structuralEq a2 b2
     (UnOp ia _ oa a, UnOp ib _ ob b) -> ia == ib ||
       oa == ob && structuralEq a b
-    (ExplicitD ia _ ja ha a, ExplicitD ib _ jb hb b) -> ia == ib ||
-      structuralEq ja jb && structuralEq ha hb && structuralEq a b
+    (ExplicitD ia _ va ja ha a, ExplicitD ib _ vb jb hb b) -> ia == ib ||
+      structuralEq va vb && structuralEq ja jb &&
+      structuralEq ha hb && structuralEq a b
     -- to have a warning when new cases are added:
     (Var{}, _) -> False
     (Tag{}, _) -> False
@@ -656,14 +657,15 @@ instance N a => N (Expr a) where
   step = foldUnOp Step
   toN = Const . toN
   toD = toD . unsafeEval "toD"
-  explicitD j h e = unsafePerformIO $ newId >>= \ i ->
-    let m = liftM3 explicitD
-          (for j $ \ (d,v) -> liftM2 (,) (em d) (em v))
-          (for h $ \ (d,v1,v2) -> liftM3 (,,) (em d) (em v2) (em v2))
+  explicitD v j h e = unsafePerformIO $ newId >>= \ i ->
+    let m = liftM4 explicitD
+          (for v em)
+          (for j $ \ (d,v) -> (,v) <$> em d)
+          (for h $ \ (d,v1,v2) -> (,v1,v2) <$> em d)
           (em e)
         em = evalMaybe
     in
-    pure $ ExplicitD i m j h e
+    pure $ ExplicitD i m v j h e
   dLevel _ = DLAny
 
 unsafeEval debugName =
@@ -703,8 +705,8 @@ showExprWithSharing expr
       UnOp i _ op a -> add i "" $ do
         la <- go a
         pure $ unwords [showUnOp op, la]
-      ExplicitD i _ j h a -> add i "" $ do
-        pure $ unwords ["ExplicitD", show j, show h, show a]
+      ExplicitD i _ v j h a -> add i "" $ do
+        pure $ unwords ["ExplicitD", show v, show j, show h, show a]
     add i suffix action = do
       (m, vs) <- S.get
       when (IntSet.notMember i m) $ do
@@ -742,8 +744,8 @@ showExpr m p@(pNegate, pa, pp) = \ case
     let f@(_, _, p) = (op == Negate, P.AssocNone, 10)
     in
       parensIf (p <= pp || (op == Negate && pp > 0)) [showUnOp op, showExpr m f a]
-  ExplicitD i _ j h a ->
-    unwords ["ExplicitD", show j, show h, show a]
+  ExplicitD i _ v j h a ->
+    unwords ["ExplicitD", show v, show j, show h, show a]
   where
     argParens = m == SEM_Maxima && pp == 10 && not pNegate
 
@@ -763,7 +765,7 @@ debugShowExpr = \ case
   Const a -> mconcat ["Const (", show a, ")"]
   BinOp i m op a b -> unwords ["BinOp", show i, sm m, show op, go a, go b]
   UnOp i m op a -> unwords ["UnOp", show i, sm m, show op, go a]
-  ExplicitD i m j h a -> unwords ["ExplicitD", show i, sm m, "TODO ExplicitD"] -- show op, go a]
+  ExplicitD i m v j h a -> unwords ["ExplicitD", show i, sm m, "TODO ExplicitD"] -- show op, go a]
   where
     go x = mconcat ["(", debugShowExpr x, ")"]
     sm x = showsPrec 10 x ""

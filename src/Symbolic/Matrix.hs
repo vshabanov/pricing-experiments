@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -Wincomplete-patterns #-}
+{-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 -- | Symbolic matrix
 module Symbolic.Matrix
   ( M, (!.), matrix

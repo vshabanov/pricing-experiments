@@ -1,5 +1,5 @@
 {-# LANGUAGE MagicHash, ScopedTypeVariables, CPP #-}
-{-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
+{-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields -O2 #-}
 
 module Main (module Main) where
 
@@ -936,7 +936,8 @@ fitSystem inputs guesses system0
     resultsWith1stDerivatives =
       zipWith (\ r dis ->
         explicitD
-          (map (first toN) $ filter ((/= 0) . fst) $ zip (LA.toList dis) inputs)
+          inputs
+          (map (first toN) $ filter ((/= 0) . fst) $ zip (LA.toList dis) [0..])
           [] -- no hessian
           (toN r))
       results
@@ -945,13 +946,14 @@ fitSystem inputs guesses system0
     -- very slow, but 'diff' of the result produces correct AD derivatives
     resultsWith2ndDerivatives =
       [explicitD
+       inputs
        -- 1st order
-       [(toN d, i)|(ii, i) <- zip [0..] inputs, let (d,_) = j S.!. (io,ii), d /= 0]
+       [(toN d, ii) | ii <- [0..n-1], let (d,_) = j S.!. (io,ii), d /= 0]
        -- 2nd order
        [-- trace (printf "∂²o%d/∂i%d∂i%d = %f" io ix iy d) $
-        (toN (if ix == iy then d/2 else d), x, y)
-       |(ix, x) <- zip [0..] inputs
-       ,(iy, y) <- drop ix $ zip [0..] inputs
+        (toN (if ix == iy then d/2 else d), ix, iy)
+       |ix <- [0..n-1]
+       ,iy <- [ix..n-1]
        ,let (_dodx, splitAt n -> (dis,dos)) = j S.!. (io,ix)
        ,let d = sum $ [dis !! iy] <> [dos !! v * fst (j S.!. (v,iy)) | v <- [0..m-1]]
        ,d /= 0]
