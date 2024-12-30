@@ -60,13 +60,22 @@ executable Test
     Main.hs
   other-modules:
     Analytic
+    Analytic.Market
+    Analytic.Pure
+    Bump
     Market
+    NLFitting
     Number
+    Percent
     Random
+    Solving
+    StructuralComparison
     Symbolic
     Symbolic.Matrix
     Tenor
+    Traversables
     Tridiag
+    Unique
 
 test-suite test-symbolic
   import: common
@@ -74,4 +83,6 @@ test-suite test-symbolic
   main-is: Symbolic.hs
   other-modules:
     Number
+    StructuralComparison
+    Unique
   ghc-options: -main-is Symbolic.testSymbolic

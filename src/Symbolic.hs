@@ -8,6 +8,7 @@ module Symbolic
   , tag
   , lift
   , unlift
+  , untag
   , eval
   , diff
   , simplify
@@ -44,20 +45,15 @@ import qualified Text.Parsec.Language as P
 
 import Test.QuickCheck
 import Number
+import Unique
+import StructuralComparison
 import Data.Function
 import Data.Traversable
 import Control.DeepSeq
 import GHC.Generics (Generic)
 import Debug.Trace
 
-import System.IO.Unsafe (unsafePerformIO)
-import Data.IORef
 import qualified Control.Monad.State.Strict as S
-
-test = do
-  fix $ \ loop -> do
-    l <- getLine
-    unless (l == "ok") loop
 
 {- | Expression that can store values and variables.
 
@@ -82,15 +78,13 @@ data Expr a
     (Expr a)
   deriving (Generic, NFData)
 
-var x = unsafePerformIO $ newId >>= \ i -> pure $ Var i x
-tag t e = unsafePerformIO $ newId >>= \ i -> pure $ Tag i (evalMaybe e) t e
+var x = withNewId $ \ i -> Var i x
+tag t e = withNewId $ \ i -> Tag i (evalMaybe e) t e
 lift = Const
 unlift e = unsafeEval "unlift" e
 -- explicit = Explicit
 
 type VarId = String
--- | Unique subexpression id to help with sharing
-type I = Int
 
 data BinOp
   = Plus
@@ -138,6 +132,18 @@ evalMaybe = \ case
   UnOp _ m _ _ -> m
   ExplicitD _ m _ _ _ _ -> m
 
+-- | Remove 'tag' which opens a way to constant propagation
+untag :: N a => Expr a -> Expr a
+untag expr = S.evalState (go expr) IntMap.empty
+  where
+    go = \ case
+      v@Var{} -> pure v
+      Tag i _ _ e -> m i $ go e
+      c@Const{} -> pure c
+      BinOp i _ op a b -> m i $ liftM2 (foldBinOp op) (go a) (go b)
+      UnOp i _ op e -> m i $ foldUnOp op <$> go e
+      ExplicitD i _ v j h a -> m i $ mapMExplicitD explicitD go v j h a
+
 eval :: N a => (VarId -> a) -> Expr a -> a
 eval subst expr = S.evalState (go expr) IntMap.empty
   where
@@ -151,12 +157,7 @@ eval subst expr = S.evalState (go expr) IntMap.empty
       UnOp i (Just x) _ _ -> pure x
       UnOp i _ op a -> m i $ unOp op <$> go a
       ExplicitD i (Just x) _ _ _ _ -> pure x
-      ExplicitD i _ v j h a -> m i $ do
-        ev <- for v go
-        eh <- for h $ \ (d,v1,v2) -> (,v1,v2) <$> go d
-        ej <- for j $ \ (d,v) -> (,v) <$> go d
-        ea <- go a
-        pure $ explicitD ev ej eh ea
+      ExplicitD i _ v j h a -> m i $ mapMExplicitD explicitD go v j h a
 
 m :: Int -> S.State (IntMap a) a -> S.State (IntMap a) a
 m i act = do
@@ -294,15 +295,6 @@ diffVar expr by = S.evalState (d expr) IntMap.empty
     sech x = 1 / cosh x
     nonDiff s = error $ "non-differentiable: " <> s
 
--- 2^63/1e9/86400/365 = 292 years, should be enough.
--- And 1Gz atomic increment is barely possible (more like 200MHz).
-idSource :: IORef Int
-idSource = unsafePerformIO (newIORef 0)
-{-# NOINLINE idSource #-}
-
-newId :: IO Int
-newId = atomicModifyIORef' idSource $ \x -> let z = x+1 in (z,z)
-
 ------------------------------------------------------------------------------
 -- Common subexpression elimination
 
@@ -373,6 +365,17 @@ mapExplicitD c f v j h a = c
   [(f d, v) | (d,v) <- j]
   [(f d, v1, v2) | (d,v1,v2) <- h]
   (f a)
+
+mapMExplicitD c f v j h a = do
+  ev <- for v f
+  eh <- for h $ \ (d,v1,v2) -> (,v1,v2) <$> f d
+  ej <- for j $ \ (d,v) -> (,v) <$> f d
+  ea <- f a
+  pure $ c ev ej eh ea
+
+constToMaybe = \ case
+  Const a -> Just a
+  _ -> Nothing
 
 ------------------------------------------------------------------------------
 -- Simplification
@@ -565,7 +568,7 @@ instance StructuralEq a => StructuralEq (Expr a) where
     -- to have a warning when new cases are added:
     (Var{}, _) -> False
     (Tag{}, _) -> False
-    (Const _, _) -> False
+    (Const{}, _) -> False
     (BinOp{}, _) -> False
     (UnOp{}, _) -> False
     (ExplicitD{}, _) -> False
@@ -576,14 +579,13 @@ instance N a => IsString (Expr a) where
 foldBinOp op (Const a) (Const b) = Const $ binOp op a b
 foldBinOp op a b = mkBinOp op a b
 
-mkBinOp op a b = unsafePerformIO $ newId >>= \ i ->
-  pure $ BinOp i (liftA2 (binOp op) (evalMaybe a) (evalMaybe b)) op a b
+mkBinOp op a b = withNewId $ \ i ->
+  BinOp i (liftA2 (binOp op) (evalMaybe a) (evalMaybe b)) op a b
 
 foldUnOp op (Const a) = Const $ unOp op a
 foldUnOp op a = mkUnOp op a
 
-mkUnOp op a = unsafePerformIO $ newId >>= \ i ->
-  pure $ UnOp i (unOp op <$> evalMaybe a) op a
+mkUnOp op a = withNewId $ \ i -> UnOp i (unOp op <$> evalMaybe a) op a
 
 instance N a => Num (Expr a) where
   a + b
@@ -657,15 +659,12 @@ instance N a => N (Expr a) where
   step = foldUnOp Step
   toN = Const . toN
   toD = toD . unsafeEval "toD"
-  explicitD v j h e = unsafePerformIO $ newId >>= \ i ->
-    let m = liftM4 explicitD
-          (for v em)
-          (for j $ \ (d,v) -> (,v) <$> em d)
-          (for h $ \ (d,v1,v2) -> (,v1,v2) <$> em d)
-          (em e)
-        em = evalMaybe
-    in
-    pure $ ExplicitD i m v j h e
+  explicitD v j h e = maybe new Const folded
+    where
+      folded = mapMExplicitD explicitD constToMaybe v j h e
+      new = withNewId $ \ i -> ExplicitD i m v j h e
+      m = mapMExplicitD explicitD evalMaybe v j h e
+
   dLevel _ = DLAny
 
 unsafeEval debugName =
@@ -705,8 +704,9 @@ showExprWithSharing expr
       UnOp i _ op a -> add i "" $ do
         la <- go a
         pure $ unwords [showUnOp op, la]
-      ExplicitD i _ v j h a -> add i "" $ do
-        pure $ unwords ["ExplicitD", show v, show j, show h, show a]
+      ExplicitD i _ v j h e -> add i "" $
+        mapMExplicitD (\ v j h e -> unwords ["ExplicitD", show v, show j, show h, show e])
+          go v j h e
     add i suffix action = do
       (m, vs) <- S.get
       when (IntSet.notMember i m) $ do

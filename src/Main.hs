@@ -1,5 +1,5 @@
-{-# LANGUAGE MagicHash, ScopedTypeVariables, CPP #-}
-{-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields -O2 #-}
+{-# LANGUAGE MagicHash, ScopedTypeVariables, CPP, MultilineStrings #-}
+{-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
 
 module Main (module Main) where
 
@@ -27,6 +27,7 @@ import Text.Printf
 import qualified Numeric.AD.Mode.Reverse as R
 import Control.Comonad.Cofree
 import System.Process
+import Data.MemoUgly
 
 import Random
 import Tridiag
@@ -39,164 +40,6 @@ import Bump
 import NLFitting
 import Traversables
 import Percent
-
-data Option a
-  = Option
-    { oStrike :: a
-    , oMaturityInYears :: a
-    , oDirection :: OptionDirection
-    }
-data OneTouch a
-  = OneTouch
-    { otBarrier :: a
-    , otBarrierPosition :: BarrierPosition
-    , otPayOn :: PayOn
-    , otMaturityInYears :: a
-    }
-data Forward a
-  = Forward
-    { fStrike :: Strike a
-    , fMaturityInYears :: MaturityInYears a
-    }
-newtype Strike a = Strike { strike :: a }
-  deriving (Num, Fractional, Floating, Erf)
-newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
-  deriving (Num, Fractional, Floating, Erf)
-
-rates :: Market a -> Rates a
-rates m = Rates{s = get Spot m, rf = get RateFor m, rd = get RateDom m}
-
-digiPricer :: Erf a => Option a -> Market a -> Greek -> a
-digiPricer o market what = case what of
-  PV ->
-    φ * exp (-rd*τ) * nc (φ*dm) -- digi
-  where
-    k = oStrike o
-    τ = oMaturityInYears o - m PricingDate
-    φ = directionφ $ oDirection o
-    x = m Spot
-    σ = impliedVol market τ k
-    rd = m RateDom
-    rf = m RateFor
-    nc = normcdf
-    f = x * exp ((rd-rf)*τ)
-    dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
-    m i = get i market
-
-blackScholesPricer :: Erf a => Option a -> Market a -> Greek -> a
-blackScholesPricer o market greek = bs greek BS{..}
-  where
-    k = oStrike o
-    d = oDirection o
-    t = oMaturityInYears o - m PricingDate
-    s = m Spot
-    σ = impliedVol market t k
-    rf = m RateFor
-    rd = m RateDom
-    m i = get i market
-
-pay1Pricer :: Erf a => OneTouch a -> Market a -> Greek -> a
-pay1Pricer ot market PV = exp (-rd*τ)
-  where
-    τ = otMaturityInYears ot - m PricingDate
-    rd = m RateDom
-    m i = get i market
-
-noTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
-noTouchPricer ot market what =
-  pay1Pricer ot market what - oneTouchPricer ot market what
-
-oneTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
-oneTouchPricer ot market PV =
-  exp (-ω*rd*τ) *
-  (  (b/x)**((θm+𝜗m)/σ) * nc (-η*ep)
-   + (b/x)**((θm-𝜗m)/σ) * nc ( η*em))
-  where
-    b = otBarrier ot
-    τ = otMaturityInYears ot - m PricingDate
-    η = barrierPositionη $ otBarrierPosition ot
-    ω = payOnω $ otPayOn ot
-    x = m Spot
-    σ = impliedVol market τ b
-    rd = m RateDom
-    rf = m RateFor
-    θp = (rd-rf)/σ + σ/2
-    θm = (rd-rf)/σ - σ/2
-    𝜗m = sqrt (θm^2 + 2*(1-ω)*rd)
-    ep = ( log (x/b) - σ*𝜗m*τ) / (σ*sqrt τ)
-    em = (-log (x/b) - σ*𝜗m*τ) / (σ*sqrt τ)
-    nc = normcdf
-    n = normdf
-    m i = get i market
-
-forwardPricer :: Floating a => Forward a -> Market a -> Greek -> a
-forwardPricer f market what = case what of
-  PV ->
-    x * exp ((-rf)*τ) - k * exp ((-rd)*τ)
-  where
-    Strike k = fStrike f
-    MaturityInYears mat = fMaturityInYears f
-    τ = mat - m PricingDate
-    x = m Spot
-    rd = m RateDom
-    rf = m RateFor
-    m i = get i market
-
--- | ϵ -- a sample from a normal distribution with mean=0 and stddev=1
-spotAtT market ϵ τ =
-  s0 * exp ((μ̂ - σ^2/2)*τ + σ*ϵ*sqrt τ)
-  where
-    μ̂ = rd - rf
-    s0 = m Spot
-    σ = impliedVol market τ (oStrike o)
-    rd = m RateDom
-    rf = m RateFor
-    m i = get i market
-
-spotPath market dτ es =
-  map ((s0 *) . exp) $
-  scanl' (+) 0 [(μ̂ - σ^2/2)*dτ + σ*ϵ*sqrt dτ | ϵ <- es]
-  where
-    μ̂ = rd - rf
-    s0 = m Spot
-    σ = impliedVol market (dτ * intToN (length es)) (oStrike o)
-    rd = m RateDom
-    rf = m RateFor
-    m i = get i market
-
-pay1Pv :: N a => Option a -> Market a -> (a -> a) -> a
-pay1Pv o market _ =
-  exp (-rd*τ)
-  where
-    rd = m RateDom
-    τ = oMaturityInYears o - m PricingDate
-    m i = get i market
-
-optionPv :: N a => Option a -> Market a -> (a -> a) -> a
-optionPv o market spotAt =
-  exp (-rd*τ) * -- log1pexp (payoff * scale) / scale
-  step payoff * payoff
-  -- max payoff 0
-  where
-    scale = 1e10 -- better with 100, but doesn't break with 1e10
-    payoff = φ * (spotAt τ - k)
-    k = oStrike o
-    τ = oMaturityInYears o - m PricingDate
-    φ = directionφ $ oDirection o
-    rd = m RateDom
-    m i = get i market
-
-digiOptionPv o market spotAt =
-  exp (-rd*τ) * step (φ * (spotAt τ - k))
-  where
-    k = oStrike o
-    τ = oMaturityInYears o - m PricingDate
-    φ = directionφ $ oDirection o
-    rd = m RateDom
-    m i = get i market
-
-combine a b market what = a market what + b market what
-scale s f market what = s * f market what
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -235,7 +78,7 @@ monteCarlo market =
 --   fmap sum $ forConcurrently (splitMixSplits threads) $ seqpure .
   -- Jacobian похоже тоже надо внутри нитки делать
   -- зависает в каких-то блокировках
-    (/ n) . parMapSum 8 (pv . spotPath market dt . map realToFrac)
+    (/ n) . parMapSum 8 (pv . spotPath o market dt . map realToFrac)
     $ chunkedGaussian nt (n `div` threads)
   where
     seqpure a = a `seq` pure a
@@ -252,7 +95,7 @@ monteCarlo market =
 
 _monteCarlo :: N a => Market a -> a
 _monteCarlo mkt =
-  treeSum [getPv mkt (spotAtT mkt (realToFrac ϵ)) | ϵ <- gaussianQuasiRandom n] / n
+  treeSum [getPv mkt (spotAtT o mkt (realToFrac ϵ)) | ϵ <- gaussianQuasiRandom n] / n
 --   unsafePerformIO $
 --   fmap sum $ forConcurrently (splitMixSplits threads) $ \ sm ->
 --     pure $! treeSum [getPv mkt (spotAtT mkt (realToFrac ϵ)) | ϵ <- gaussianSM tn sm] / fromRational n
@@ -271,7 +114,7 @@ _monteCarlo mkt =
 
 _integrated :: N a => Market a -> a
 _integrated mkt =
-  treeSum [getPv mkt (spotAtT mkt (realToFrac $ x+step/2)) *
+  treeSum [getPv mkt (spotAtT o mkt (realToFrac $ x+step/2)) *
        realToFrac (normcdf (x+step) - normcdf x) | x <- [from, from+step .. to]]
   -- мы можем просто провести интеграцию
   where
@@ -298,7 +141,7 @@ integrated = integrated' $ truncate (10/width :: Double)
 
 integrated' :: N a => Int -> Market a -> a
 integrated' n mkt = realToFrac step * treeSum
-  [getPv mkt (spotAtT mkt (realToFrac mid))
+  [getPv mkt (spotAtT o mkt (realToFrac mid))
   | x <- [0..n-1]
   , let mid = invnormcdf (toEnum x * step + step/2)
   ]
@@ -437,7 +280,9 @@ volSens f = putStrLn $ unlines
   ]
 
 smileAtT :: N a => [VolTableRow Tenor a] -> Rates a -> a -> Smile a
-smileAtT surface rates = flip smile rates . volTableRow surface
+smileAtT surface rates =
+  memo (\ t -> -- trace (exprType t) $
+         flip smile rates $ volTableRow surface t)
 -- bumping works, but it's only 6-7 times faster than the full AD version.
 -- smileAtT surface rates t =
 -- --  trace (printf "smileAtT %f" (toD t)) $
@@ -486,25 +331,28 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
   Smile_
   { smileImpliedVol = unlift . solvedS . lift
   , smileLocalVol = \ k ->
+      -- (trace $ take 1000 $ showExprWithSharing dSolvedSdt) $
+      eval (const k) dSolvedSdt
 --      (trace $ take 100 $ showExprWithSharing $ diff (solvedS $ lift k) t) $
-      unlift $ diff (solvedS $ lift k) t
+--       unlift $ diff (solvedS $ lift k) t
   }
 {-
 λ> bumpDiff (\ t -> localVol mkt (1.1+t) 1) 0 0.0001
 2.201655918713727e-3
-λ> AD.grad (\ [t] -> localVol mkt (1.1+t) 1) [0]
+λ> R.grad (\ [t] -> localVol mkt (1.1+t) 1) [0]
 [2.201655812057629e-3]
 λ> localVol mkt 1.1 1
 -5.815826767965226e-3
 λ> bumpDiff (\ t -> impliedVol mkt (1.1+t) 1) 0 0.0001
 -5.815826784605349e-3
-λ> AD.grad (\ [t] -> impliedVol mkt (1.1+t) 1) [0]
+λ> R.grad (\ [t] -> impliedVol mkt (1.1+t) 1) [0]
 [-5.815826767966395e-3]
 -}
   where
     pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ solvedS k * 100) (toD $ s*100)
     f = forwardRate rates t -- F_0,T
     kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
+    dSolvedSdt = cse $ untag $ diff (solvedS "k") t
     solvedS = -- trace (show $ toD kDNS)
       polynomialInDeltaExpC0 f t [c0,c1,c2]
     ϕRR :: Num a => a
@@ -537,10 +385,12 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
 --       , ϕRR*(sm k25dc - sm k25dp) === σrr25
 --       , 1/2*(sm k25dc + sm k25dp) - sm kDNS === σ25dSS
       , sm k25dc === sm k25dp + σrr25
-      , 1/2*(sm k25dc + sm k25dp) === sm kDNS + σ25dSS
-        --  ^ reordered to use division in (===) for better error estimates
+      , 1/2*(sm k25dc + sm k25dp) === σatm + σ25dSS
+        -- Using σatm instead sm kDNS gives a better match between
+        -- bump and AD greeks. Better convergence?
       , delta Put  k25dp === -0.25 -- smile 25D, not Black-Scholes
       , delta Call k25dc ===  0.25
+        --  ^ reordered to use division in (===) for better error estimates
       ]
     v25dMS = vStrangle env k25dpMS (σatm+σbf25) k25dcMS (σatm+σbf25)
     vStrangle env kp σp kc σc =
@@ -669,30 +519,33 @@ volTableRow surface = \ (tagVolT . lift -> t) -> case Map.splitLookup (toD t) ro
 
 testSurface :: N a => [VolTableRow Tenor a]
 testSurface =
-  -- Copied from Iain Clark, p64, EURUSD
-  --             ATM
-  --  Exp     Bid     Ask    25D RR   25D BF   10D RR   10D BF
-  [r  "1D"   7.556   8.778  (-0.636)   0.084  (-1.251)  0.299
-  ,r  "1W"  11.550  12.350  (-1.432)   0.270  (-2.540)  0.840
-  ,r  "2W"  11.650  12.300  (-1.510)   0.257  (-2.750)  0.808
-  ,r  "3W"  11.490  12.030  (-1.558)   0.265  (-2.857)  0.823
-  ,r  "1M"  11.540  12.040  (-1.660)   0.260  (-3.042)  0.795
-  ,r  "2M"  11.605  12.006  (-1.667)   0.315  (-3.075)  0.990
-  ,r  "3M"  11.795  12.195  (-1.677)   0.365  (-3.103)  1.165
---   ,r  "6M"  12.340  12.690  (0)   0  (-3.132)  1.460
-  ,r  "6M"  12.340  12.690  (-1.680)   0.445  (-3.132)  1.460
---   ,r  "1Y"  18.25  18.25  (-0.6)   0.95  (-1.359)  3.806 -- Table 3.3 p50
-  ,r  "1Y"  12.590  12.915  (-1.683)   0.520  (-3.158)  1.743
-  ,r "18M"  12.420  12.750  (-1.577)   0.525  (-3.000)  1.735
-  ,r  "2Y"  12.315  12.665  (-1.520)   0.495  (-2.872)  1.665
-  ,r  "3Y"  11.915  12.310  (-1.407)   0.457  (-2.683)  1.572
-  ,r  "5Y"  11.075  11.520  (-1.183)   0.417  (-2.217)  1.363
-  ,r  "7Y"  11.144  10.626  (-1.205)   0.353  (-2.382)  1.157
-  ]
+  map toRow $ filter (not . isPrefixOf "--") $ lines
+  """
+-- Copied from Iain Clark, p64, EURUSD
+--           ATM
+-- Exp   Bid     Ask    RR25   BF25    RR10   BF10
+   1D   7.556   8.778  -0.636  0.084  -1.251  0.299
+   1W  11.550  12.350  -1.432  0.270  -2.540  0.840
+   2W  11.650  12.300  -1.510  0.257  -2.750  0.808
+   3W  11.490  12.030  -1.558  0.265  -2.857  0.823
+   1M  11.540  12.040  -1.660  0.260  -3.042  0.795
+   2M  11.605  12.006  -1.667  0.315  -3.075  0.990
+   3M  11.795  12.195  -1.677  0.365  -3.103  1.165
+--    6M  12.340  12.690   0      0      -3.132  1.460
+   6M  12.340  12.690  -1.680  0.445  -3.132  1.460
+--    1Y  18.25   18.25   -0.6    0.95   -1.359  3.806 -- Table 3.3 p50
+   1Y  12.590  12.915  -1.683  0.520  -3.158  1.743
+  18M  12.420  12.750  -1.577  0.525  -3.000  1.735
+   2Y  12.315  12.665  -1.520  0.495  -2.872  1.665
+   3Y  11.915  12.310  -1.407  0.457  -2.683  1.572
+   5Y  11.075  11.520  -1.183  0.417  -2.217  1.363
+   7Y  11.144  10.626  -1.205  0.353  -2.382  1.157
+  """
   where
-    r tenor bid ask rr25 bf25 rr10 bf10 =
-      VolTableRow tenor (p (bid+ask) / 2) (p rr25) (p bf25) (p rr10) (p bf10)
-    p x = x / 100
+    toRow (words -> [tenor, bid, ask, rr25, bf25, rr10, bf10]) =
+      VolTableRow (read tenor)
+        ((p bid + p ask) / 2) (p rr25) (p bf25) (p rr10) (p bf10)
+    p x = toN (read x) / 100
 
 -- p = blackScholesPricer
 --     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
@@ -851,8 +704,8 @@ fem' nx nt market =
 --     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
 --     maxSpot = oStrike o * 3 / 2
 --     minSpot = oStrike o     / 2
-    maxSpot = realToFrac $ toD $ max s0 $ spotAtT market   5 τ
-    minSpot = realToFrac $ toD $ min s0 $ spotAtT market (-5) τ
+    maxSpot = realToFrac $ toD $ max s0 $ spotAtT o market   5 τ
+    minSpot = realToFrac $ toD $ min s0 $ spotAtT o market (-5) τ
     -- need 0.1*s0 for σ=0.003, rd=0.2, rf=0.01 to have diagonally
     -- dominant matrix; σ=0.03 is fine
     s0 = get Spot market
