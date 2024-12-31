@@ -148,3 +148,24 @@ n :: Floating a => a -> a
 n = normdf
 
 normdf t = exp (- t^2/2) / sqrt (2*pi)
+
+-- | SABR model, Hull p648, Iain p60 (same formula, but no f0=k case)
+-- f0 -- initial forward
+-- σ0 -- initial volatility
+-- ν  -- volatility of volatility
+-- ρ  -- correlation between spot and volatility
+sabr f0 t [σ0, ρ, ν] k
+--  | f0 == k = σ0*b/f0**(1-β)
+    -- the default formula is undefined when f0=k, this can break AD
+  | otherwise = a * b * ϕ / χ
+  where
+    x = (f0*k)**((1-β)/2)
+    y = (1-β)*log(f0/k)
+    a = σ0/(x*(1 + y^2/24 + y^4/1920))
+    b = 1 + ((1-β)^2*σ0^2/(24*x^2) + ρ*β*ν*σ0/(4*x) + (2-3*ρ^2)/24*ν^2)*t
+    ϕ = ν*x/σ0*log(f0/k)
+    χ = log((sqrt(1 - 2*ρ*ϕ + ϕ^2) + ϕ - ρ) / (1-ρ))
+    β = 0
+    -- 0 stochastic normal (Hull recommends this,
+    --   it's 1.2x faster than β=1, and fits BF=0 with smaller errors)
+    -- 1 stochastic lognormal (Iain recommends this)

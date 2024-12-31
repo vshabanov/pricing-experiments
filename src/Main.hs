@@ -17,6 +17,7 @@ import qualified Graphics.Gnuplot.Plot.TwoDimensional as Plot2D
 import qualified Graphics.Gnuplot.Graph.TwoDimensional as Graph2D
 import qualified Graphics.Gnuplot.LineSpecification as LineSpec
 import Data.Maybe
+import Data.Tuple.Extra
 import qualified Numeric.LinearAlgebra as LA
 import Control.Monad
 import Data.List
@@ -78,6 +79,8 @@ monteCarlo market =
 --   fmap sum $ forConcurrently (splitMixSplits threads) $ seqpure .
   -- Jacobian похоже тоже надо внутри нитки делать
   -- зависает в каких-то блокировках
+  -- В AD было примечание, что tape плохо работает в параллельных
+  -- вычислениях
     (/ n) . parMapSum 8 (pv . spotPath o market dt . map realToFrac)
     $ chunkedGaussian nt (n `div` threads)
   where
@@ -323,11 +326,10 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
 --         ,("v25dMS", v25dMS)
 -- --         ,("vMS", vStrangle env k25dpMS (solvedS k25dpMS) k25dcMS (solvedS k25dcMS))
 -- --         ,("vSS", vStrangle env k25dp   (solvedS k25dp)   k25dc   (solvedS k25dc))
---         ,("c0", c0)
---         ,("c1", c1)
---         ,("c2", c2)
+--         ,("c0 (or σ0)", c0)
+--         ,("c1 (or ρ) ", c1)
+--         ,("c2 (or ν) ", c2)
 --         ]]) $
---  trace (show ("partials", f, c0, partials c0))
   Smile_
   { smileImpliedVol = unlift . solvedS . lift
   , smileLocalVol = \ k ->
@@ -354,7 +356,24 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
     kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
     dSolvedSdt = cse $ untag $ diff (solvedS "k") t
     solvedS = -- trace (show $ toD kDNS)
-      polynomialInDeltaExpC0 f t [c0,c1,c2]
+      smileFun f s t [c0,c1,c2]
+    g :: N a => T3 a
+--     g = T3 (-2) (-0.1) 0.1
+--     smileFun f s t [c0,c1,c2] k = polynomialInDeltaExpC0 f t [c0,c1,c2] k
+    -- Converges on the vol table, and on BF=RR=0
+    -- but fails on BF=1% and RR=0 or some other number
+    -- seems that polynomialInDeltaExpC0 is not flexible enough
+    -- for pure symmetric smiles.
+    g = T3 0.1 0.1 0.1
+    smileFun f s t [c0,c1,c2] k = sabr s t [c0,c1,c2] k
+    -- with β=1
+    -- Handles BF=RR=0 with error ~1e-7..1e-9 (bigger than polynomialInDeltaExpC0)
+    -- shows almost flat line with numerical noise
+    -- Handles BF=1% RR=0 and other RRs well
+    -- smile doesn't have flat wings
+    -- About 2.2x times slower than polynomialInDeltaExpC0
+    -- with β=0 errors <1e-10 and about 1.8x slower
+    -- BF=RR=0 is not flat at wings but looks flat in -25D..25D range
     ϕRR :: Num a => a
     ϕRR = 1 -- convention, could be -1
 
@@ -366,21 +385,18 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
     [σ25dSS] = -- [σbf25]
       fitSystemThrow env [σbf25] $ \ env [σ25dSS] ->
       let T5 c0 c1 c2 _k25dp _k25dc = fitSS env σ25dSS
-          sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
+          sm = smileFun f s t [c0,c1,c2]
       in
         [vStrangle env k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS]
     fitSS env σ25dSS =
 --      trace (show ("fitSS", toD σ25dSS)) $
-      fitSystemThrow (T σ25dSS env) (T5 (-2) (-0.1) 0.1 k25dpMS k25dcMS)
-                 $ \ (T σ25dSS env) (T5 c0 c1 c2 k25dp k25dc) ->
-      let sm = polynomialInDeltaExpC0 f t [c0,c1,c2]
+      let T3 g0 g1 g2 = g in
+      fitSystemThrow (T σ25dSS env) (T5 g0 g1 g2 k25dpMS k25dcMS)
+                 $ \ (T σ25dSS env) (T5 c0 c1 c2 k25dp   k25dc) ->
+      let sm = smileFun f s t [c0,c1,c2]
           delta d k = bs Delta BS{k,d,σ=sm k,s,rf,rd,t}
           -- PipsForwardDelta
       in
-      -- Converges on the vol table, and on BF=RR=0
-      -- but fails on BF=1% and RR=0 or some other number
-      -- seems that polynomialInDeltaExpC0 is not flexible enough
-      -- for pure symmetric smiles.
       [ sm kDNS === σatm
 --       , ϕRR*(sm k25dc - sm k25dp) === σrr25
 --       , 1/2*(sm k25dc + sm k25dp) - sm kDNS === σ25dSS
@@ -422,6 +438,7 @@ iainsDiff = mapM_ putStrLn $ iainsTable3_5 $ \ n k s ->
 iains x = polynomialInDeltaExpC0 1.3395163731662 1
 --  [-1.701005, 0.050131, 0.800801]
 --  ^ example in the book is wrong, values don't match iainsTable3_5
+--    but for SABR we're pretty close
   [-1.4606627150883185,-1.0877333376976042,1.2259367762563833]
   --  ^ these have 0.034% error (0.024% max)
   x
@@ -460,7 +477,6 @@ testDiff = writeFile "test.maxima" $ unlines $
     def n e = mconcat [n, ":", toMaxima e, "$"]
     p = polynomialInDeltaExpC0 "f" "t" ["c0","c1","c2"] "x" :: Expr Double
 
-
 polynomialInDeltaExpC0 f t [c0,c1,c2] k =
 --  c0 + c1*(f/k) + c2*(f/k)^2
 --  ^ fits very nice, but has huge negative numbers on range ends
@@ -469,9 +485,6 @@ polynomialInDeltaExpC0 f t [c0,c1,c2] k =
     fun x = c0 + c1*δ x + c2*δ x^2
     σ0 = exp c0
     δ x = normcdf (x / (σ0 * sqrt t))
-
--- -- | df(x0..xn-1, t) / dt
--- deriv :: N a => (forall a . N a => [a] a -> a) -> [a] -> a -> a
 
 infix 4 === -- same as ==
 
@@ -519,7 +532,7 @@ volTableRow surface = \ (tagVolT . lift -> t) -> case Map.splitLookup (toD t) ro
 
 testSurface :: N a => [VolTableRow Tenor a]
 testSurface =
-  map toRow $ filter (not . isPrefixOf "--") $ lines
+  map toRow $ filter (not . null) $ map stripComment $ lines
   """
 -- Copied from Iain Clark, p64, EURUSD
 --           ATM
@@ -534,6 +547,8 @@ testSurface =
 --    6M  12.340  12.690   0      0      -3.132  1.460
    6M  12.340  12.690  -1.680  0.445  -3.132  1.460
 --    1Y  18.25   18.25   -0.6    0.95   -1.359  3.806 -- Table 3.3 p50
+--    1Y   12.590  12.915   0  0 -3.158  1.743
+--    366D  12.590  12.915  0  0  -3.158  1.743
    1Y  12.590  12.915  -1.683  0.520  -3.158  1.743
   18M  12.420  12.750  -1.577  0.525  -3.000  1.735
    2Y  12.315  12.665  -1.520  0.495  -2.872  1.665
@@ -546,6 +561,10 @@ testSurface =
       VolTableRow (read tenor)
         ((p bid + p ask) / 2) (p rr25) (p bf25) (p rr10) (p bf10)
     p x = toN (read x) / 100
+    stripComment = \ case
+      '-':'-':_ -> []
+      [] -> []
+      (x:xs) -> x : stripComment xs
 
 -- p = blackScholesPricer
 --     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
@@ -589,7 +608,7 @@ plotf :: Double -> Double -> (Double -> Double) -> IO ()
 plotf a b f = void $ GP.plotDefault $
   Plot2D.function Graph2D.lines (linearScale 1000 (a, b)) f
 
-plot = void $ GP.plotDefault $
+plot mkt = void $ GP.plotDefault $
   Plot2D.function Graph2D.lines
   (linearScale 1000 (oStrike o - 1, oStrike o + 1::Double))
   (\x ->
@@ -602,9 +621,12 @@ plot = void $ GP.plotDefault $
 --   getPv mkt (const x)
 --   dvdx' p (m Spot (const x)) PV Spot 0.0001
 --    dvdx' p (m RateDom (const x)) PV RateDom 0.0001
-     impliedVol mkt 5 x
+     impliedVol mkt 1 x
   )
 --   `mappend`
+--   Plot2D.function Graph2D.lines
+--   (linearScale 1000 (oStrike o - 1, oStrike o + 1::Double))
+--   (impliedVol mkt (366/365))
 --   Plot2D.list Graph2D.boxes
 --   [(spotAtT mkt x (oMaturityInYears o), 0.5::Double)
 --   |x <- [-0.2,-0.199..0.2::Double]]
@@ -617,7 +639,7 @@ plot3d = -- plotFunc3d [Custom "data" ["lines"],
     blackScholesPricer o (modify PricingDate (const pd) $ m Spot (const s)) PV
   )
 
-plotVolSurf = plotMeshFun [0.1,0.11..2] [0.5,0.51..2::Double]
+plotVolSurf mkt = plotMeshFun [0.1,0.2..1.2] [0.5,0.51..2::Double]
   $ impliedVol mkt
 
 plotMeshFun xs ys f =

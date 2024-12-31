@@ -1,24 +1,14 @@
 #+STARTUP: indent
 
 * Local-vol, make sure mc/fem match bs with implied vol
-local vol requires  dσ̂imp/dT dX dX^2
-
-dX are easily obtainable analytically (though would be great to use AD)
-
-not so with /dT. do we need a mixed mode?
 * refactorings
 ** move solving and smile fitting to separate modules
 ** make market indepenent from the input type
-** move remaining analytic formulas to Analytic
 * Implied vol smile calibration
-** Experiment with SABR, maybe it will fit in all scenarios?
-like BF=1% RR=0 that doesn't work now
 ** Better interpolation
 RR interpolation is nonsence. Calibrate tenor smiles, then interpolate
 standartized ATM, P25, C25 vols and solve smile for these vols and
 corresponding strikes
-** Memoization
-save solved tenor smiles and intermediate ones
 ** Add BF10/RR10?
 ** Market conventions?
 * Pay on touch fem/mc? Stoping time?

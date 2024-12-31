@@ -614,6 +614,8 @@ instance N a => Num (Expr a) where
 
 instance N a => Fractional (Expr a) where
   a / b
+--   | structuralEq a b = 1
+   | SCmp b == 1 = a
 --   | SCmp a == 0 && SCmp b /= 0 = 0
    | otherwise   = foldBinOp Divide a b
 
@@ -638,9 +640,10 @@ instance N a => Floating (Expr a) where
   acosh = foldUnOp ACosh
   atanh = foldUnOp ATanh
 
-  (**) = foldBinOp Expt
+  a ** b
+   | SCmp b == 0 = 1
+   | otherwise   = foldBinOp Expt a b
 --   logBase = foldBinOp LogBase
-
 
 --     log1p x = log (1 + x)
 --     expm1 x = exp x - 1
