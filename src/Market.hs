@@ -23,7 +23,8 @@ module Market
     Market
   , Get(..)
   , VolInput(..)
-  , Smile(..), impliedVol, localVol -- TODO: separate the market and inputs
+  , Smile(..), impliedVol, localVol, impliedVol'k
+    -- TODO: separate the market and inputs
     -- * Building a new market
   , buildMarket, input, node, Recipe, Node
     -- * Changing inputs
@@ -63,12 +64,14 @@ data Get n a where
 
 data Smile a
   = Smile_
-    { smileImpliedVol :: a -> a -- ^ strike -> implied vol
-    , smileLocalVol   :: a -> a -- ^ strike -> local vol
+    { smileImpliedVol   :: a -> a -- ^ strike -> implied vol
+    , smileImpliedVol'k :: a -> a -- ^ strike -> d implied vol / dk
+    , smileLocalVol     :: a -> a -- ^ strike -> local vol
     }
 
-impliedVol mkt = smileImpliedVol . get Smile mkt
-localVol   mkt = smileLocalVol   . get Smile mkt
+impliedVol'k mkt = smileImpliedVol'k . get Smile mkt
+impliedVol   mkt = smileImpliedVol   . get Smile mkt
+localVol     mkt = smileLocalVol     . get Smile mkt
 
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)
@@ -193,4 +196,4 @@ mkt = buildMarket $ do
   input RateDom 0.1
   v1d <- input (Vol "1D" ATMVol) 0.1
   v1y <- input (Vol "1Y" ATMVol) 0.2
-  node Smile $ (\ v1 v2 t -> Smile_ (*(v1*v2*t)) (*t)) <$> v1d <*> v1y
+  node Smile $ (\ v1 v2 t -> Smile_ (*(v1*v2*t)) (*t) (*t)) <$> v1d <*> v1y

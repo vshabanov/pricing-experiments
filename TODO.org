@@ -1,6 +1,10 @@
 #+STARTUP: indent
 
 * Local-vol, make sure mc/fem match bs with implied vol
+** extend Expr with @if x ~ y then e1 else e2@
+where we differentiate both branches.
+We can then safely use SABR
+** local vol at t=0?
 * refactorings
 ** move solving and smile fitting to separate modules
 ** make market indepenent from the input type

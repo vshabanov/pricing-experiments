@@ -6,6 +6,8 @@ import Data.List
 import Number
 import Market
 import Analytic.Pure
+import Debug.Trace
+import Text.Printf
 
 data Option a
   = Option
@@ -33,25 +35,31 @@ newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
 rates :: Market a -> Rates a
 rates m = Rates{s = get Spot m, rf = get RateFor m, rd = get RateDom m}
 
-digiPricer :: Erf a => Option a -> Market a -> Greek -> a
-digiPricer o market what = case what of
-  PV ->
-    φ * exp (-rd*τ) * nc (φ*dm) -- digi
-  where
-    k = oStrike o
-    τ = oMaturityInYears o - m PricingDate
-    φ = directionφ $ oDirection o
-    x = m Spot
-    σ = impliedVol market τ k
-    rd = m RateDom
-    rf = m RateFor
-    nc = normcdf
-    f = x * exp ((rd-rf)*τ)
-    dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
-    m i = get i market
+bsDigitalPricer :: Erf a => Option a -> Market a -> Greek -> a
+bsDigitalPricer o market greek =
+  bsDigital greek $ marketBS o market
+
+bsDigitalUndiscPricer :: Erf a => Option a -> Market a -> Greek -> a
+bsDigitalUndiscPricer o market greek =
+  bsDigitalUndisc greek $ marketBS o market
+
+digitalPricer :: Erf a => Option a -> Market a -> Greek -> a
+digitalPricer o market greek =
+  uncurry (digital greek) $ marketBS_impliedVol'k o market
+
+digitalUndiscPricer :: Erf a => Option a -> Market a -> Greek -> a
+digitalUndiscPricer o market greek =
+  uncurry (digitalUndisc greek) $ marketBS_impliedVol'k o market
 
 blackScholesPricer :: Erf a => Option a -> Market a -> Greek -> a
-blackScholesPricer o market greek = bs greek BS{..}
+blackScholesPricer o market greek = bs greek $ marketBS o market
+
+marketBS_impliedVol'k :: Erf a => Option a -> Market a -> (BS a, a)
+marketBS_impliedVol'k o market = (b, impliedVol'k market t k)
+  where b@BS{t,k} = marketBS o market
+
+marketBS :: Erf a => Option a -> Market a -> BS a
+marketBS o market = BS{..}
   where
     k = oStrike o
     d = oDirection o
@@ -131,6 +139,27 @@ spotPath o market dτ es =
     rf = m RateFor
     m i = get i market
 
+spotPathLocalVol market dτ es =
+  scanl' (\ s (i,ϵ) ->
+            let vol = σ i s in
+--            trace (printf "σ %d %f = %f" i s vol) $
+            s * exp ((μ̂ - vol^2/2)*dτ + vol*ϵ*sqrt dτ))
+    s0 (zip [0..] es)
+  where
+    μ̂ = rd - rf
+    s0 = m Spot -- + 1e-5
+    -- as vol is undefined (NaN) at t=0 we use the implied vol in the
+    -- first step and then local vol
+    -- TODO: We use impliedVol for strike=spot, the correct way would
+    --       be to use the smile CDF, so we can generate the spot
+    --       distribution corresponding to the smile. We will need to
+    --       solve the smile CDF for normcdf ϵ
+    σ 0 s = impliedVol market dτ s
+    σ i s = localVol market (dτ * intToN i) s
+    rd = m RateDom
+    rf = m RateFor
+    m i = get i market
+
 pay1Pv :: N a => Option a -> Market a -> (a -> a) -> a
 pay1Pv o market _ =
   exp (-rd*τ)
@@ -153,7 +182,7 @@ optionPv o market spotAt =
     rd = m RateDom
     m i = get i market
 
-digiOptionPv o market spotAt =
+digitalOptionPv o market spotAt =
   exp (-rd*τ) * step (φ * (spotAt τ - k))
   where
     k = oStrike o

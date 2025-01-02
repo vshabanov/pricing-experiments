@@ -5,6 +5,8 @@ package pricing-experiments
   optimization: 2
   ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS
 --               -fno-unoptimized-core-for-interpreter
+--   profiling: True
+--   profiling-detail: all-functions
 
 -- package hmatrix
 --   flags: +openblas

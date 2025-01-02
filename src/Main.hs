@@ -11,11 +11,6 @@ import Debug.Trace
 import Data.List.Split
 import Data.Foldable
 import Criterion.Main
-import Graphics.Gnuplot.Simple
-import qualified Graphics.Gnuplot.Advanced as GP
-import qualified Graphics.Gnuplot.Plot.TwoDimensional as Plot2D
-import qualified Graphics.Gnuplot.Graph.TwoDimensional as Graph2D
-import qualified Graphics.Gnuplot.LineSpecification as LineSpec
 import Data.Maybe
 import Data.Tuple.Extra
 import qualified Numeric.LinearAlgebra as LA
@@ -27,12 +22,12 @@ import System.IO.Unsafe
 import Text.Printf
 import qualified Numeric.AD.Mode.Reverse as R
 import Control.Comonad.Cofree
-import System.Process
 import Data.MemoUgly
 
 import Random
 import Tridiag
 import Market
+import Gnuplot
 import Tenor
 import Analytic
 import Symbolic
@@ -81,15 +76,17 @@ monteCarlo market =
   -- зависает в каких-то блокировках
   -- В AD было примечание, что tape плохо работает в параллельных
   -- вычислениях
-    (/ n) . parMapSum 8 (pv . spotPath o market dt . map realToFrac)
+    (/ n) . sum . map -- parMapSum 1
+    (pv . spotPathLocalVol market dt . map realToFrac)
     $ chunkedGaussian nt (n `div` threads)
   where
     seqpure a = a `seq` pure a
-    pv xs = product [step (otBarrier ot - x) | x <- xs]
-      * getPv mkt (const $ last xs)
+    pv xs = -- product [step (otBarrier ot - x) | x <- xs]
+      -- *
+      getPv mkt (const $ last xs)
     threads = 1
     nt, n :: Num a => a
-    nt = 500
+    nt = 100
     n = 50000
     τ = oMaturityInYears o - m PricingDate
     dt = τ / nt
@@ -113,7 +110,7 @@ _monteCarlo mkt =
     -- 8 0.032%
     tn = n `div` threads
     n :: Num a => a
-    n = 1000000
+    n = 10000
 
 _integrated :: N a => Market a -> a
 _integrated mkt =
@@ -154,8 +151,8 @@ integrated' n mkt = realToFrac step * treeSum
 o :: Erf a => Option a
 o = Option
   { oStrike =
-    1.3
---    forwardRate mkt (oMaturityInYears o)
+    1.35045280 -- kDNS, vol=12.75250%, pv=0.061223760477414985
+  --    forwardRate mkt (oMaturityInYears o)
   , oMaturityInYears = 1 -- 0.1/365
   , oDirection = Call }
 ot :: Erf a => OneTouch a
@@ -170,8 +167,8 @@ f = Forward { fStrike = oStrike o, fMaturityInYears = oMaturityInYears o }
 
 p :: N a => Market a -> Greek -> a
 getPv :: N a => Market a -> (a -> a) -> a
--- p     = digiPricer o
--- getPv = digiOptionPv o
+-- p     = digitalPricer o
+-- getPv = digitalOptionPv o
 p     = blackScholesPricer o
 getPv = optionPv o
 -- p     = noTouchPricer ot
@@ -216,7 +213,7 @@ pv :: Double
 -- λ> zipWith pct greeks greeksBump
 -- [-0.779%,1.087%,-1.034%,-0.779%,0.779%] -- vanilla
 -- [-2.703%,-2.258%,-3.307%,-2.703%,-0.790%] -- digi
-     -- digiPricer o
+     -- digitalPricer o
      -- [3.6661059215952516e-2,-0.2291316200997029,0.6795758158561364,-0.9165264803988129,3.744296366024975e-2] ~= greeksBump
      -- blackScholesPricer o
      -- [0.5644849344925212,13.74789720598219,11.847533227133829,-14.112123362313032,-4.744637550015519] epsEq greeksAnalytic
@@ -304,9 +301,14 @@ mapTenor f v@VolTableRow{t} = v { t = f t }
 -- smile :: N a => VolTableRow a a -> Rates a -> Smile a
 -- smile v@VolTableRow{t,σatm,σbf25,σrr25} rates@Rates{s,rf,rd} =
 smile :: N a => VolTableRow (Expr a) (Expr a) -> Rates a -> Smile a
-smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
+smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
+--   | SCmp t == 0 =
+  =
 --   trace (unlines $
---       [ printf "%-12s %.8f  %.5f%%" n (toD k) (toD $ solvedS k * 100)
+--       [printf "t=%f" (toD t)]
+--       <>
+--       [ printf "%-12s %.8f  %.5f%%  %f" n (toD k) (toD $ solvedS k * 100)
+--         (toD $ bs PV BS{k=k,d=Call,σ=solvedS k,s,rf,rd,t})
 --       | (n::String,k) <-
 --         [("k25-d-P"   , k25dp)
 --         ,("k25-d-P-MS", k25dpMS)
@@ -331,10 +333,11 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
 --         ,("c2 (or ν) ", c2)
 --         ]]) $
   Smile_
-  { smileImpliedVol = unlift . solvedS . lift
+  { smileImpliedVol = compile (cse $ untag $ solvedS "k") . const
+  , smileImpliedVol'k = \ k -> dSolvedSdk (const k)
   , smileLocalVol = \ k ->
-      -- (trace $ take 1000 $ showExprWithSharing dSolvedSdt) $
-      eval (const k) dSolvedSdt
+--      (trace $ take 100000 $ showExprWithSharing localVol) $
+      localVol (const k)
 --      (trace $ take 100 $ showExprWithSharing $ diff (solvedS $ lift k) t) $
 --       unlift $ diff (solvedS $ lift k) t
   }
@@ -354,9 +357,19 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
     pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ solvedS k * 100) (toD $ s*100)
     f = forwardRate rates t -- F_0,T
     kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
+    dSolvedSdk = compile $ cse $ untag $ diff (solvedS "k") "k"
     dSolvedSdt = cse $ untag $ diff (solvedS "k") t
     solvedS = -- trace (show $ toD kDNS)
       smileFun f s t [c0,c1,c2]
+
+    localVol = compile $ cse $ untag $ lv "k"
+    lv k =
+--  σ(K,T) = sqrt (2*(∂C/∂T + (rd-rf) K ∂C/∂K + rf C)/(K² ∂²C/∂K²))
+      sqrt (2*(diff c t + (rd-rf)*k*dcdk + rf*c)/(k^2 * d²cdk²))
+      where
+        dcdk = diff c k
+        d²cdk² = diff dcdk k
+        c = bs PV BS{k=k,d=Call,σ=solvedS k,s,rf,rd,t}
     g :: N a => T3 a
 --     g = T3 (-2) (-0.1) 0.1
 --     smileFun f s t [c0,c1,c2] k = polynomialInDeltaExpC0 f t [c0,c1,c2] k
@@ -374,6 +387,9 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd}) =
     -- About 2.2x times slower than polynomialInDeltaExpC0
     -- with β=0 errors <1e-10 and about 1.8x slower
     -- BF=RR=0 is not flat at wings but looks flat in -25D..25D range
+    -- Huge volatility in wings in smaller tenors,
+    -- can't run Monte-Carlo as it starts with k=f0 or can cross it during
+    -- the simulation
     ϕRR :: Num a => a
     ϕRR = 1 -- convention, could be -1
 
@@ -604,70 +620,53 @@ mcError, integratedError :: N a => a
 mcError = (1 - monteCarlo mkt / p mkt PV) * 100
 integratedError = (1 - integrated mkt / p mkt PV) * 100
 
-plotf :: Double -> Double -> (Double -> Double) -> IO ()
-plotf a b f = void $ GP.plotDefault $
-  Plot2D.function Graph2D.lines (linearScale 1000 (a, b)) f
+-- bad, ignores the fact that probabilities are not independent
+-- hitProbabilityDownAndOut mkt barrier n =
+--   1-product [1 - volSmileCDF mkt (i/n) barrier | i <- [1..n]]
 
-plot mkt = void $ GP.plotDefault $
-  Plot2D.function Graph2D.lines
-  (linearScale 1000 (oStrike o - 1, oStrike o + 1::Double))
-  (\x ->
---     blackScholesPricer
---       Option { oStrike = x, oMaturityInYears = 12/12, oDirection = Call } mkt PV
---    p (m Spot (const x)) PV
---    p (m RateDom (const x)) PV
---      R.diff
---      step (x - oStrike o)
---   getPv mkt (const x)
---   dvdx' p (m Spot (const x)) PV Spot 0.0001
---    dvdx' p (m RateDom (const x)) PV RateDom 0.0001
-     impliedVol mkt 1 x
-  )
---   `mappend`
---   Plot2D.function Graph2D.lines
---   (linearScale 1000 (oStrike o - 1, oStrike o + 1::Double))
---   (impliedVol mkt (366/365))
---   Plot2D.list Graph2D.boxes
---   [(spotAtT mkt x (oMaturityInYears o), 0.5::Double)
---   |x <- [-0.2,-0.199..0.2::Double]]
+volSmileCDF mkt t s =
+  digitalUndiscPricer (Option{oStrike=s,oDirection=Put,oMaturityInYears=t}) mkt PV
+volSmileCDF_BS mkt t s =
+  bsDigitalUndiscPricer (Option{oStrike=s,oDirection=Put,oMaturityInYears=t}) mkt PV
 
-plot3d = -- plotFunc3d [Custom "data" ["lines"],
---                      Custom "surface" [], Custom "hidden3d" []] [Plot3dType Surface]
+volSmileCDF_LocalVol mkt t =
+  cdfPlot
+  $ map (last . spotPathLocalVol mkt dt . map realToFrac)
+  $ chunkedGaussian nt n
+  where
+    -- same as 'volSmileCDF' with n=100k nt=100, but takes a lot of time
+    -- n=400k nt=400 is even closer
+    n = 100000
+    nt = 100
+    dt = t / fromIntegral nt
+
+plot mkt = plotGraphs
+  $ map (p . volSmileCDF mkt) [0.1,0.15..1]
+--   [
+--    p $ volSmileCDF mkt t
+--   ,volSmileCDF_LocalVol mkt t
+-- --   ,p (impliedVol mkt 0)
+-- --   ,p (impliedVol mkt 0.0001)
+-- --   ,p (impliedVol mkt 0.001)
+-- --   ,p (impliedVol mkt 0.01)
+--   ,p (impliedVol mkt t)
+--   ]
+  where
+    t = 1.1
+    p = functionPlot
+        1.3 1.4
+--        0.5 (oStrike o + 1)
+        -- (oStrike o - 0.1) (oStrike o + 0.1)
+
+plot3d =
   plotMeshFun
          [0.5,0.51..1.5::Double] [0,0.1..1::Double]
   (\s pd ->
     blackScholesPricer o (modify PricingDate (const pd) $ m Spot (const s)) PV
   )
 
-plotVolSurf mkt = plotMeshFun [0.1,0.2..1.2] [0.5,0.51..2::Double]
-  $ impliedVol mkt
-
-plotMeshFun xs ys f =
-  plotMesh $ sort [[(x, y, f' y) | y <- ys] | x <- xs, let !f' = f x]
-
-plotMesh :: [[(Double, Double, Double)]] -> IO ()
-plotMesh rows = do
-  let dat = "mesh.dat"
-      script = "script.plot"
-  writeFile dat $ unlines [unlines [unwords $ map show [y,x,v] | (x,y,v) <- r] | r <- rows]
-  writeFile script $ unlines $
-    ["set view 60, 60"
-     -- "set view 90, 90"
-    ,"set key off"
-    ,"unset colorbox"
---     ,"set contour both"
-    ,"set hidden3d"
---    ,"set term aqua enhanced 4"
---     ,"set term pdfcairo linewidth 0.01"
---     ,"set output \"output.pdf\""
-    ,"set pm3d depthorder border lc 'black' lw 0.2"
---     ,concat ["splot [0:1] [0:20] [-0.1:1.1] \"", dat, "\" ",
-    ,concat ["splot \"", dat, "\" ",
-      -- "with lines palette lw 0.33"
-      "with pm3d"
-     ]
-    ]
-  void $ spawnCommand $ "gnuplot " <> script
+plotVolSurf mkt = plotMeshFun [0.1,0.15..1.2] [1,1.01..1.6::Double]
+  $ localVol mkt
 
 linInterpolate x (g:gs) = go g gs
   where
@@ -701,7 +700,6 @@ fem' nx nt market =
   $ addLogSpot (fst $ last iterations)
   -- LA.disp 1 $ LA.fromRows iterations
   where
-    noTitle x = fmap (Graph2D.lineSpec (LineSpec.title "" LineSpec.deflt)) x
     addLogSpot iteration =
 --          [(iToLogSpot 0, 0)]
       zipWith (,) (map iToLogSpot [0..nx+1]) iteration
@@ -784,8 +782,13 @@ gradeSpot x
 --   | otherwise = 1 - 2*(1-x)^2
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
-main =
-  print $ zipWith pct greeksBumpLocalVol greeksADLocalVol
+main = do
+--  printf "Analytic PV = %f, MC PV = %f, %s\n" a m (show $ pct a m)
+  plot mkt
+  where
+    a = p mkt PV
+    m = monteCarlo mkt
+--  print $ zipWith pct greeksBumpLocalVol greeksADLocalVol
 --  print (localVol mkt 1.1 1 :: Double)
 _main = defaultMain
   [ bgroup "fem" (map benchFem [(100,100), (100,500), (500,100), (500,500)])

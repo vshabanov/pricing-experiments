@@ -12,6 +12,7 @@ module Symbolic
   , eval
   , diff
   , simplify
+  , compile
   , toMaxima
 
   , testSymbolic
@@ -25,6 +26,7 @@ import Data.Number.Erf
 import Data.Ord
 import Data.Ratio
 import Data.Array
+import Data.Array.Base (amap)
 import Data.Bifunctor
 import Data.Either
 import Data.Maybe
@@ -296,6 +298,94 @@ diffVar expr by = S.evalState (d expr) IntMap.empty
     nonDiff s = error $ "non-differentiable: " <> s
 
 ------------------------------------------------------------------------------
+-- Compilation
+
+-- | Create a faster evaluator for 'Expr'.
+-- About 3x faster than 'eval' thanks to a faster shared
+-- subexpressions handling.
+-- It may worth to @'cse' . 'untag'@ the expression before to reduce
+-- the number of nodes.
+compile :: N a => Expr a -> (VarId -> a) -> a
+compile expr = evalOps (compileOps expr)
+
+{-# SPECIALIZE compile :: Expr Double -> (VarId -> Double) -> Double #-}
+
+-- | Operation to evaluate the expression in a single array element.
+-- Uses precomputed subexpressions from other array elements.
+data Operation a
+  = OVar VarId
+  | OTag !I -- ^ redirect to another index
+  | OConst a
+  | OBinOp !(a -> a -> a) !I !I
+  | OUnOp !(a -> a) !I
+  | OExplicitD
+    [I]             -- ^ variables
+    [(I, Int)]      -- ^ jacobian [(∂x/∂var, var)]
+    [(I, Int, Int)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
+    !I
+--   deriving Show
+
+evalOps :: N a => Array Int (Operation a) -> (VarId -> a) -> a
+evalOps ops subst = r!hi
+  where
+    (lo, hi) = bounds r -- TODO: runST and evaluate the array sequentially
+    r = amap e ops
+    e = \ case
+      OVar v -> subst v
+      OTag i -> r!i
+      OConst x -> x
+      OBinOp f a b -> f (r!a) (r!b)
+      OUnOp f a -> f (r!a)
+      OExplicitD v j h a ->
+        mapExplicitD explicitD (r!) v j h a
+
+-- | Create a sequence of operations to evaluate the expression.
+-- Every next operation can use results of previous operations, so we
+-- keep the sharing automatically without an additional 'State' and
+-- 'IntMap'. The profiler shows a lot of allocations in 'm' and
+-- 'IntMap.insert', we're removing these allocations with 'compile'.
+compileOps :: N a => Expr a -> Array Int (Operation a)
+compileOps expr = listArray (0, nOps-1) $ reverse ops
+  where
+    CompileState _ ops nOps =
+      S.execState (go expr) (CompileState IntMap.empty [] 0)
+    go :: N a => Expr a -> Compile a Int
+    go = \ case
+      Var i v -> o i $ pure $ OVar v
+      Tag i (Just x) _ _ -> iconst i x
+      Tag i _ _ e -> o i $ OTag <$> go e
+      Const x -> lit x
+      BinOp i (Just x) _ _ _ -> iconst i x
+      BinOp i _ op a b -> o i $ liftM2 (OBinOp $ binOp op) (go a) (go b)
+      UnOp i (Just x) _ _ -> iconst i x
+      UnOp i _ op a -> o i $ OUnOp (unOp op) <$> go a
+      ExplicitD i (Just x) _ _ _ _ -> iconst i x
+      ExplicitD i _ v j h a -> o i $ mapMExplicitD OExplicitD go v j h a
+    o :: I -> Compile a (Operation a) -> Compile a Int
+    o i act = do
+      im <- S.gets cIdToOperation
+      case IntMap.lookup i im of
+        Nothing -> do
+          !op <- act
+          S.state $ \ (CompileState m ops nOps) ->
+            (nOps, CompileState (IntMap.insert i nOps m) (op:ops) (nOps+1))
+        Just oi ->
+          pure oi
+    iconst i x = o i $ pure $ OConst x
+    -- add a literal constant without the Expr id mapping
+    lit :: a -> Compile a Int
+    lit c = S.state $ \ (CompileState m ops nOps) ->
+      (nOps, CompileState m (OConst c:ops) (nOps+1))
+
+type Compile e a = S.State (CompileState e) a
+data CompileState a
+  = CompileState
+    { cIdToOperation   :: !(IntMap Int) -- ^ Expr id to operation index map
+    , cOperations      :: ![Operation a]
+    , cTotalOperations :: !Int
+    }
+
+------------------------------------------------------------------------------
 -- Common subexpression elimination
 
 cse :: (N a, StructuralOrd a) => Expr a -> Expr a
@@ -343,6 +433,7 @@ cse e = snd $ S.evalState (go e) (Map.empty, IntMap.empty)
         Just r ->
           pure r
 
+-- 'Expr' that can be used as a key for the common subexpression elimination
 data CExpr a
   = CVar VarId
   | CTag VarId (CExpr a)

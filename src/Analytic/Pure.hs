@@ -2,7 +2,9 @@
 -- | Pure analytic pricers, no market dependencies
 module Analytic.Pure where
 
+import Debug.Trace
 import Data.Number.Erf
+import StructuralComparison
 
 data VolTableRow t a
   = VolTableRow
@@ -21,6 +23,7 @@ data Greek
   | RhoFor
   | RhoDom
   | Delta
+  | DualDelta -- ^ dv/dk
   | PipsForwardDelta
   | Gamma
   | Vega
@@ -124,6 +127,8 @@ bs greek BS{k,d,t=τ,s=x,σ,rf,rd} = case greek of
     -φ * x * τ * exp (-rf*τ) * nc (φ*dp)
   Delta -> -- pips spot delta
     φ * exp (-rf*τ) * nc (φ*dp)
+  DualDelta ->
+    -φ * exp (-rd*τ) * nc (φ*dm)
   PipsForwardDelta ->
     φ * nc (φ*dp)
   Gamma ->
@@ -141,6 +146,51 @@ bs greek BS{k,d,t=τ,s=x,σ,rf,rd} = case greek of
     dp = (log (f/k) + σ^2/2*τ) / (σ*sqrt τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
 
+-- | Vanilla (flat vol) digital (dual delta), ignores smile effect.
+bsDigital :: Erf a => Greek -> BS a -> a
+bsDigital greek b@BS{d} = case greek of
+  PV ->
+    - φ * bs DualDelta b
+  where
+    φ = directionφ d
+
+-- | Pure bs probability of having spot above/below the strike.
+bsDigitalUndisc :: Erf a => Greek -> BS a -> a
+bsDigitalUndisc greek b@BS{t=τ,rd} = case greek of
+  PV ->
+    bsDigital greek b / exp (-rd*τ)
+
+{- | digital with a smile effect.
+Needs ∂σ\/∂k.
+
+Digigital call replication via call spread
+
+digital(k) = lim (h->0) (vanilla(k-h) - vanilla(k+h))\/2h
+           = - ∂\/∂k vanilla(k)
+
+since vanilla(k) with a smile is vanilla(k,σ(k)) we get
+
+digital(k) = - vanilla_k(k,σ(k)) - vanilla_σ(k,σ(k)) * σ'(k)
+           = - dualDelta         - vega              * σ'(k)
+
+Digital put replication via put spread
+digital(k) = lim (h->0) (vanilla(k+h) - vanilla(k-h))\/2h
+           = ∂\/∂k vanilla(k) = -digital_call(k)
+-}
+digital :: Erf a => Greek -> BS a -> a -> a
+digital greek b@BS{t=τ,rd,d} dσdk = case greek of
+  PV ->
+    φ * (- bs DualDelta b - bs Vega b * dσdk)
+  where
+    φ = directionφ d
+
+-- | Probability of having spot above\/below the strike with a smile effect.
+-- Needs ∂σ\/∂k.
+digitalUndisc :: Erf a => Greek -> BS a -> a -> a
+digitalUndisc greek b@BS{t=τ,rd} dσdk = case greek of
+  PV ->
+    digital greek b dσdk / exp (-rd*τ)
+
 nc :: Erf a => a -> a
 nc = normcdf
 
@@ -155,9 +205,13 @@ normdf t = exp (- t^2/2) / sqrt (2*pi)
 -- ν  -- volatility of volatility
 -- ρ  -- correlation between spot and volatility
 sabr f0 t [σ0, ρ, ν] k
---  | f0 == k = σ0*b/f0**(1-β)
+--  | SCmp f0 == SCmp k = σ0*b/f0**(1-β)
     -- the default formula is undefined when f0=k, this can break AD
-  | otherwise = a * b * ϕ / χ
+    -- Comparison here doesn't help as we have a differentiated version
+    -- and no longer run this function at all.
+  | otherwise =
+--     trace (show (f0,k)) $
+    a * b * ϕ / χ
   where
     x = (f0*k)**((1-β)/2)
     y = (1-β)*log(f0/k)

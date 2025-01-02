@@ -5,12 +5,12 @@ module Random
   , gaussian
   , chunkedGaussian
   , chunkedGaussian'
+  , chunkedGaussianQuasi
   , splitMixSplits
   , gaussianSM
   )
   where
 
-import qualified Data.IntMap as IntMap
 import qualified System.Random.SplitMix as SplitMix
 import qualified Control.Monad.State.Strict as State.Strict
 import Control.Monad.Identity
@@ -28,9 +28,9 @@ import GHC.Prim (word2Double#, (*##))
 import qualified System.Random.MWC as MWC
 import qualified System.Random.MWC.Distributions as MWC
 
-import Graphics.Gnuplot.Simple
-
 import qualified Data.Vector.Unboxed as U
+
+import Gnuplot
 
 {-# INLINE gaussianQuasiRandom #-}
 {-# INLINE gaussian #-}
@@ -54,6 +54,8 @@ gaussianSM n =
 
 chunkedGaussian chunk n = chunkedGaussian' chunk n defaultSM
 chunkedGaussian' chunk n = chunksOf chunk . gaussianSM (chunk * n)
+
+chunkedGaussianQuasi chunk n = chunksOf chunk $ gaussianQuasiRandom (chunk * n)
 
 -- chunkedGaussian chunk n = go n $ gaussian (chunk * n)
 --   where
@@ -114,8 +116,6 @@ replicateAcc n act = go n []
       !x <- act
       go (n-1) (x:acc)
 
-
-
 -- doesn't look to approach 1, more like jumping around 0.2-0.7
 lawOfIteratedLogarithm = sum (take n $ map (\x -> (toEnum . fromEnum) x*2-1) $ unfoldr (Just . SplitMix.bitmaskWithRejection64' 1) (SplitMix.mkSMGen 1337))
   / sqrt (2*n * log (log n))
@@ -123,15 +123,10 @@ lawOfIteratedLogarithm = sum (take n $ map (\x -> (toEnum . fromEnum) x*2-1) $ u
     n :: Num a => a
     n = 5000000
 
-plotg = plotListStyle [] defaultStyle-- {plotType = HiSteps}
-  (hist 0.001
+plotg = plotGraphs
+  [histogramPlot 0.001
 --   $ map (\ e -> spotAtT mkt e 0.5)
-   $ gaussian 500000)
-hist :: Double -> [Double] -> [(Double, Double)]
-hist bucket l =
-  map (\ (b,c) -> (toEnum b * bucket, toEnum c / toEnum (length l))) $
-  IntMap.toList $ IntMap.fromListWith (+)
-  [(floor (x / bucket) :: Int, 1::Int) | x <- l]
+   $ gaussian 50000]
 
 --    1
 --   1 1
@@ -142,8 +137,8 @@ pascalTriangleRow n
   | otherwise = let p = pascalTriangleRow (n-1) in
       zipWith (+) ([0]<>p) (p<>[0])
 
-plotp = plotListStyle [] defaultStyle
-  [(toEnum i :: Double, x / sum p) | (i,x) <- zip [start..end] (drop start p)]
+plotp = plotGraphs
+  [[(toEnum i, fromRational $ x / sum p) | (i,x) <- zip [start..end] (drop start p)]]
   where
     p :: [Rational]
     p = pascalTriangleRow n -- sum [Double] overlows at 1100
