@@ -23,6 +23,7 @@ import Text.Printf
 import qualified Numeric.AD.Mode.Reverse as R
 import Control.Comonad.Cofree
 import Data.MemoUgly
+import GHC.Conc
 
 import Random
 import Tridiag
@@ -30,6 +31,7 @@ import Market
 import Gnuplot
 import Tenor
 import Analytic
+import StructuralComparison
 import Symbolic
 import Number
 import Bump
@@ -153,7 +155,7 @@ o = Option
   { oStrike =
     1.35045280 -- kDNS, vol=12.75250%, pv=0.061223760477414985
   --    forwardRate mkt (oMaturityInYears o)
-  , oMaturityInYears = 1 -- 0.1/365
+  , oMaturityInYears = 1.1 -- 0.1/365
   , oDirection = Call }
 ot :: Erf a => OneTouch a
 ot = OneTouch
@@ -183,6 +185,7 @@ greeksADImpliedVol = snd $ jacobianPvGreeks (\m -> impliedVol m (1.1 + get Prici
 greeksBumpLocalVol = mapInputs (\ i -> dvdx' (\m -> localVol m (1.1 + get PricingDate m)) mkt 1 i 0.000001)
 greeksADLocalVol = snd $ jacobianPvGreeks (\m -> localVol m (1.1 + get PricingDate m) 1)
 greeksBump = mapInputs (\ i -> dvdx PV i 0.00001)
+greeksBumpFem = mapInputs (\ i -> dvdx' (const . fem) mkt () i 0.00001)
 greeksBumpIntegrated = mapInputs (\ i -> dvdx' (const . integrated) mkt () i 0.00001)
 greeksBumpMonteCarlo = mapInputs (\ i -> dvdx' (const . monteCarlo) mkt () i 0.00001)
 greeksAnalytic = map (p mkt) [Delta, Vega, RhoDom, RhoFor, Theta-- , Gamma, Vanna
@@ -307,8 +310,8 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
 --   trace (unlines $
 --       [printf "t=%f" (toD t)]
 --       <>
---       [ printf "%-12s %.8f  %.5f%%  %f" n (toD k) (toD $ solvedS k * 100)
---         (toD $ bs PV BS{k=k,d=Call,σ=solvedS k,s,rf,rd,t})
+--       [ printf "%-12s %.8f  %.5f%%  %f" n (toD k) (toD $ impliedVol k * 100)
+--         (toD $ bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t})
 --       | (n::String,k) <-
 --         [("k25-d-P"   , k25dp)
 --         ,("k25-d-P-MS", k25dpMS)
@@ -322,24 +325,22 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
 --         ,("σbf25", σbf25)
 --         ,("σrr25", σrr25)
 --         ,("σ25dSS", σ25dSS)
---         ,("σ25dSS via smile", 1/2*(solvedS k25dc + solvedS k25dp) - solvedS kDNS)
+--         ,("σ25dSS via smile", 1/2*(impliedVol k25dc + impliedVol k25dp) - impliedVol kDNS)
 --         ,("t", t)
 --         ,("f", f)
 --         ,("v25dMS", v25dMS)
--- --         ,("vMS", vStrangle env k25dpMS (solvedS k25dpMS) k25dcMS (solvedS k25dcMS))
--- --         ,("vSS", vStrangle env k25dp   (solvedS k25dp)   k25dc   (solvedS k25dc))
+-- --         ,("vMS", vStrangle env k25dpMS (impliedVol k25dpMS) k25dcMS (impliedVol k25dcMS))
+-- --         ,("vSS", vStrangle env k25dp   (impliedVol k25dp)   k25dc   (impliedVol k25dc))
 --         ,("c0 (or σ0)", c0)
 --         ,("c1 (or ρ) ", c1)
 --         ,("c2 (or ν) ", c2)
 --         ]]) $
   Smile_
-  { smileImpliedVol = compile (cse $ untag $ solvedS "k") . const
-  , smileImpliedVol'k = \ k -> dSolvedSdk (const k)
-  , smileLocalVol = \ k ->
+  { smileImpliedVol   = toFun $ impliedVol k
+  , smileImpliedVol'k = toFun $ diff (impliedVol k) k
+  , smileLocalVol     = toFun $ localVol k
+  , smileLocalVol's   = toFun $ diff (localVol k) k
 --      (trace $ take 100000 $ showExprWithSharing localVol) $
-      localVol (const k)
---      (trace $ take 100 $ showExprWithSharing $ diff (solvedS $ lift k) t) $
---       unlift $ diff (solvedS $ lift k) t
   }
 {-
 λ> bumpDiff (\ t -> localVol mkt (1.1+t) 1) 0 0.0001
@@ -354,22 +355,20 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
 [-5.815826767966395e-3]
 -}
   where
-    pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ solvedS k * 100) (toD $ s*100)
+    pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ impliedVol k * 100) (toD $ s*100)
     f = forwardRate rates t -- F_0,T
     kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
-    dSolvedSdk = compile $ cse $ untag $ diff (solvedS "k") "k"
-    dSolvedSdt = cse $ untag $ diff (solvedS "k") t
-    solvedS = -- trace (show $ toD kDNS)
-      smileFun f s t [c0,c1,c2]
+    toFun e = memo (compile (cse $ untag e) . const . unSCmp) . SCmp
 
-    localVol = compile $ cse $ untag $ lv "k"
-    lv k =
+    impliedVol k = smileFun f s t [c0,c1,c2] k -- with solved constants
+    localVol k =
 --  σ(K,T) = sqrt (2*(∂C/∂T + (rd-rf) K ∂C/∂K + rf C)/(K² ∂²C/∂K²))
       sqrt (2*(diff c t + (rd-rf)*k*dcdk + rf*c)/(k^2 * d²cdk²))
       where
         dcdk = diff c k
         d²cdk² = diff dcdk k
-        c = bs PV BS{k=k,d=Call,σ=solvedS k,s,rf,rd,t}
+        c = bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t}
+    k = "k"
     g :: N a => T3 a
 --     g = T3 (-2) (-0.1) 0.1
 --     smileFun f s t [c0,c1,c2] k = polynomialInDeltaExpC0 f t [c0,c1,c2] k
@@ -679,17 +678,17 @@ linInterpolate x (g:gs) = go g gs
 -- увеличение nx желательно сопровождать увеличением nt
 
 fem :: forall a . N a => Market a -> a
-fem = fem' 100 100
+fem = fem' 100 50
 
 fem' :: forall a . N a => Int -> Int -> Market a -> a
 fem' nx nt market =
   trace (printf "σ=%f, rd=%f, rf=%f, nx=%d, nt=%d, spot=[%.3f..%.3f], h=%.6f" (toD σ) (toD rd) (toD rf) nx nt (toD $ iToSpot 0) (toD $ iToSpot (nx+1)) (toD (h 3)) :: String) $
   linInterpolate (log $ get Spot market) $
   (\ prices -> unsafePerformIO $ do
-      let toGraph = map (\(logSpot, v) -> (toD $ exp logSpot, toD v))
-      plotMesh
-          [map (\(x,v) -> (x, toD $ iToT t, v)) $ toGraph $ addLogSpot l
-          |(l,t) <- iterations]
+--       let toGraph = map (\(logSpot, v) -> (toD $ exp logSpot, toD v))
+--       plotMesh
+--           [map (\(x,v) -> (x, toD $ iToT t, v)) $ toGraph $ addLogSpot l
+--           |(l,t) <- iterations]
 
 --         foldMap
 --         (noTitle .
@@ -706,7 +705,11 @@ fem' nx nt market =
 --       <> [(iToLogSpot (nx+1), 0)]
     iterations = take (nt+1) (iterate ump1 (u0,0))
     τ = oMaturityInYears o - get PricingDate market
-    σ = impliedVol market τ (oStrike o)
+    σ = σimp τ (oStrike o)
+    σimp = impliedVol market
+    σloc 0 = σimp (τ - iToT (nt-1))
+    σ̃loc t x = localVol market t (exp x)
+    σ̃loc' t x = localVol's market t (exp x) * exp x
     rd = get RateDom market
     rf = get RateFor market
 --    r = rd-rf -- так получается d rf = - d rd
@@ -715,7 +718,7 @@ fem' nx nt market =
     ump1 :: ([a], Int) -> ([a], Int)
     ump1 (um,mi) =
       (trimSolve 0 0 -- (if mi > 30 && mi < 40 then 45 else 0)
-      (m .+ k mi*θ .* a_bs) ((m .- k mi*(1-θ) .* a_bs) #> um), succ mi)
+      (m .+ k mi*θ .* a_bs mi) ((m .- k mi*(1-θ) .* a_bs mi) #> um), succ mi)
 --       (i .+ k mi*θ .* g_bs) ((i .- k mi*(1-θ) .* g_bs) #> um), succ mi)
 --     nx = 500 :: Int
 --     nt = 500 :: Int
@@ -724,15 +727,16 @@ fem' nx nt market =
 --     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
 --     maxSpot = oStrike o * 3 / 2
 --     minSpot = oStrike o     / 2
-    maxSpot = realToFrac $ toD $ max s0 $ spotAtT o market   5 τ
-    minSpot = realToFrac $ toD $ min s0 $ spotAtT o market (-5) τ
+    maxSpot = 2.584 -- realToFrac $ toD $ max s0 $ spotAtT o market   5 τ
+    minSpot = 0.681 -- realToFrac $ toD $ min s0 $ spotAtT o market (-5) τ
+      -- makes a big difference between AD and Bump
     -- need 0.1*s0 for σ=0.003, rd=0.2, rf=0.01 to have diagonally
     -- dominant matrix; σ=0.03 is fine
     s0 = get Spot market
     k, iToT :: Int -> a
     k i = iToT (i+1) - iToT i
-    iToT i = realToFrac ((toEnum i / toEnum nt)**β) * τ
-    β = 1 -- market Vol / 2 -- ???
+    iToT i = realToFrac ((toEnum i / toEnum nt)**bβ) * τ
+    bβ = 1 -- market Vol / 2 -- ???
 --    k = τ / (toEnum nt-1) -- time step
 --     h = (log maxSpot - log minSpot) / (toEnum nx+1) -- log spot step
 --     iToLogSpot i = toEnum i * h + log minSpot
@@ -745,25 +749,38 @@ fem' nx nt market =
     u0 :: [a]
     u0 = [getPv market (const $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [0..nx+1]]
 
-    s, b, m, a_bs :: Tridiag a
     -- FEM
-    a_bs = (σ^2/2) .* s .+ (σ^2/2-rd+rf) .* b .+ rd .* m
+--     α t _ = σ^2/2
+--     β t _ = σ^2/2-rd+rf
+    α t x = σ̃loc t x^2/2
+    β t x = σ̃loc t x*σ̃loc' t x + σ̃loc t x^2/2-rd+rf
+    γ _ = rd
+
+    a_bs :: Int -> Tridiag a
+    a_bs i = -- trimTridiag 1 1 $
+      tridiagFrom2x2Elements
+      [s + b + m
+      |i <- [1..nx+1]
+      ,let (s,b,m) = elements (iToLogSpot (i-1)) (iToLogSpot i) (α t) (β t) γ
+      ]
+      where t = τ - iToT i
+    m =
+      tridiagFrom2x2Elements
+      [(h i/6 *) <$> T4 2 1 1 2 | i <- [1..nx+1]]
+--     a_bs = (σ^2/2) .* s .+ (σ^2/2-rd+rf) .* b .+ rd .* m
 --     s = (1/h) .* tridiag nx (-1) 2 (-1)
 --     b = (1/2) .* tridiag nx (-1) 0   1
 --     m = (h/6) .* tridiag nx   1  4   1
-    s = assemble $ \ h -> scale (1/h) ( 1,-1
-                                      ,-1, 1)
-    b = assemble $ \ h -> scale (1/2) (-1, 1
-                                      ,-1, 1)
-    m = assemble $ \ h -> scale (h/6) ( 2, 1
-                                      , 1, 2)
+--     s = assemble $ \ h -> scale (1/h) ( 1,-1
+--                                       ,-1, 1)
+--     b = assemble $ \ h -> scale (1/2) (-1, 1
+--                                       ,-1, 1)
+--     m = assemble $ \ h -> scale (h/6) ( 2, 1
+--                                       , 1, 2)
     bcm = tridiagFromLists (nx+2)
       (repeat 0) ([-1] <> replicate (nx+1) 0) (repeat 0)
     bc = replicate (nx+1) 0 <> [1]
-    assemble elt = -- trimTridiag 1 1 $
-      tridiagFrom2x2Elements
-      [elt (h i) | i <- [1..nx+1]]
-    scale x (a,b,c,d) = (x*a,x*b,x*c,x*d)
+
     trimSolve t b m v =
          replicate t 0
       <> solveTridiagTDMA (trimTridiag t b m) (take (nx+2-t-b) $ drop t v)
@@ -775,6 +792,34 @@ fem' nx nt market =
 --     c = (1/h) .* b
 --     i = tridiag nx 0 1 0
 
+elements x_lm1 x_l α β γ = (s, b, m)
+  where
+    s = (2/h_l *) <$> element Diff   Diff   α
+    b =               element Diff   Normal β
+    m = (h_l/2 *) <$> element Normal Normal γ
+    n1 Normal ξ = (1-ξ)/2
+    n1 Diff   _ = -1/2
+    n2 Normal ξ = (1+ξ)/2
+    n2 Diff   _ = 1/2
+    fkl ξ = (x_l + x_lm1)/2 + ξ*h_l/2
+    h_l = x_l - x_lm1
+    element mj mi f =
+      quadrature 2 <$>  -- 1 point is not enough for 'm'
+      t4 (m n1 n1, m n1 n2
+         ,m n2 n1, m n2 n2)
+      where
+        m φi φj x = f (fkl x) * φj mj x * φi mi x
+
+data Shape = Normal | Diff
+
+-- | <https://en.wikipedia.org/wiki/Gaussian_quadrature>
+quadrature :: Floating a => Int -> (a -> a) -> a
+quadrature points f = case points of
+  1 -> 2 * f 0
+  2 -> f (-1/sqrt 3) + f (1/sqrt 3)
+  3 -> 8/9*f 0 + 5/9*(f (-sqrt(3/5)) + f (sqrt(3/5)))
+  n -> error $ printf "quadrature for %d points is not implemented" n
+
 gradeSpot x
   = x
 --   = x**0.5
@@ -783,13 +828,26 @@ gradeSpot x
 
 -- integrated 100k ~ fem 500x100 ~ 15ms
 main = do
---  printf "Analytic PV = %f, MC PV = %f, %s\n" a m (show $ pct a m)
-  plot mkt
-  where
-    a = p mkt PV
-    m = monteCarlo mkt
---  print $ zipWith pct greeksBumpLocalVol greeksADLocalVol
---  print (localVol mkt 1.1 1 :: Double)
+-- --  printf "Analytic PV = %f, MC PV = %f, %s\n" a m (show $ pct a m)
+-- --  plot mkt
+-- --  print $ fem mkt
+--   let (adDelta:_) = greeksAD
+--       femBumpDelta = dvdx' (\ m () -> fem m) mkt () Spot 0.00001
+--   printf "femBumpDelta = %f, adDelta = %f, %s\n" femDelta adDelta (show $ pct femBumpDelta adDelta)
+  let analyticPV = p mkt PV
+      femPV = pv
+  printf "femPV = %f, analyticPV = %f, %s\n" femPV analyticPV (show $ pct femPV analyticPV)
+  print greeks
+  print $ compareToAnalytic greeks
+  print greeksAD
+  print $ compareToAnalytic greeksAD
+  print $ zipWith pct greeks greeksAD
+--   where
+--     a = p mkt PV
+--     m = monteCarlo mkt
+--   print $ zipWith pct greeksBumpFem greeks
+--   print $ zipWith pct greeksBumpLocalVol greeksADLocalVol
+--   print (localVol mkt 1.1 1 :: Double)
 _main = defaultMain
   [ bgroup "fem" (map benchFem [(100,100), (100,500), (500,100), (500,500)])
   , bgroup "integrated" (map benchIntegrated [1000, 10000, 100000, 1000000])

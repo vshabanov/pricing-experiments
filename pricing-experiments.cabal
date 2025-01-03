@@ -52,7 +52,7 @@ common common
   -- other-extensions:
   hs-source-dirs:
     src
-  ghc-options: -rtsopts -with-rtsopts "-M3G"
+  ghc-options: -rtsopts -with-rtsopts "-M8G"
 
 executable Test
   import: common

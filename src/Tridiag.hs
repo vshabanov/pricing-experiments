@@ -22,6 +22,7 @@ import qualified Numeric.LinearAlgebra as LA
 
 import Test.QuickCheck
 import Text.Printf
+import Traversables
 
 infixl 6 .+, .- -- same as (+)
 infixl 7 .*, #> -- same as (*)
@@ -84,17 +85,16 @@ trimTridiag top bottom (Tridiag s l d u)
 --   c0    d0+a1  b1
 --         c1     d1+a2 b2
 --                c2    d2
-tridiagFrom2x2Elements :: Num a => [(a,a,a,a)] -> Tridiag a
+tridiagFrom2x2Elements :: Num a => [T4 a] -> Tridiag a
 tridiagFrom2x2Elements es = tridiagFromLists (length es+1)
   cs
   (zipWith (+) (as <> [0]) ([0] <> ds))
   bs
   where
-    as = [a | (a,_,_,_) <- es]
-    bs = [b | (_,b,_,_) <- es]
-    cs = [c | (_,_,c,_) <- es]
-    ds = [d | (_,_,_,d) <- es]
-
+    as = [a | T4 a _ _ _ <- es]
+    bs = [b | T4 _ b _ _ <- es]
+    cs = [c | T4 _ _ c _ <- es]
+    ds = [d | T4 _ _ _ d <- es]
 
 data Tridiag a
   = Tridiag

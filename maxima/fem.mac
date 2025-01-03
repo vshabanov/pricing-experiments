@@ -1,0 +1,29 @@
+/* -*- mode: maxima -*- */
+
+m:matrix([φ[k](x)*φ[k](x), φ[k](x)*φ[k+1](x)], [φ[k+1](x)*φ[k](x), φ[k+1](x)*φ[k+1](x)]);
+
+'integrate(m, x, x[k], x[k+1]);
+
+n1(ξ) := (1-ξ)/2;
+n2(ξ) := (1+ξ)/2;
+
+/*
+element_matrix(φ, k, x) := matrix([φ[k](x)*φ[k](x), φ[k](x)*φ[k+1](x)], [φ[k+1](x)*φ[k](x), φ[k+1](x)*φ[k+1](x)]);
+
+element(a,b) := integrate(element_matrix([a,b],1,x), x, -1, 1);
+
+b:element(lambda([x], diff(n2(x),x)), n1);
+*/
+
+
+sij(ni,nj,x) := diff(nj(x),x) * diff(ni(x),x);
+bij(ni,nj,x) := diff(nj(x),x) * ni(x);
+mij(ni,nj,x) := nj(x) * ni(x);
+
+element_matrix(f,x) := matrix([f(n1,n1,x),f(n1,n2,x)], [f(n2,n1,x),f(n2,n2,x)]);
+
+element(f) := integrate(element_matrix(f,x), x, -1, 1);
+
+s:2/h_l*element(sij);
+b:      element(bij);
+m:h_l/2*element(mij);

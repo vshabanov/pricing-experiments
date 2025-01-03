@@ -79,7 +79,7 @@ fitSystemThrow1
   => i a -- ^ n inputs
   -> a -- ^ guess
   -> (forall a . N a => i a -> a -> a)
-     -- ^ n inputs -> guess -> (result, error)
+     -- ^ n inputs -> guess -> error
   -> a -- ^ result with derivatives to inputs
 fitSystemThrow1 i g f =
   unT1 $ fitSystemThrow i (T1 g) (\ i (T1 g) -> [f i g])
@@ -90,7 +90,7 @@ fitSystemThrow
   => i a -- ^ n inputs
   -> o a -- ^ m guesses
   -> (forall a . N a => i a -> o a -> [a])
-     -- ^ n inputs -> m guesses -> (result, m errors)
+     -- ^ n inputs -> m guesses -> m errors
   -> o a -- ^ results with derivatives to inputs
 fitSystemThrow i o f =
   either error (\ o' -> replace o' o)
