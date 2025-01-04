@@ -160,10 +160,10 @@ bsDigitalUndisc greek b@BS{t=τ,rd} = case greek of
   PV ->
     bsDigital greek b / exp (-rd*τ)
 
-{- | digital with a smile effect.
+{- | digital option PV with a smile effect.
 Needs ∂σ\/∂k.
 
-Digigital call replication via call spread
+The digital call option replication via the call spread
 
 digital(k) = lim (h->0) (vanilla(k-h) - vanilla(k+h))\/2h
            = - ∂\/∂k vanilla(k)
@@ -173,7 +173,7 @@ since vanilla(k) with a smile is vanilla(k,σ(k)) we get
 digital(k) = - vanilla_k(k,σ(k)) - vanilla_σ(k,σ(k)) * σ'(k)
            = - dualDelta         - vega              * σ'(k)
 
-Digital put replication via put spread
+The digital put replication via the put spread
 digital(k) = lim (h->0) (vanilla(k+h) - vanilla(k-h))\/2h
            = ∂\/∂k vanilla(k) = -digital_call(k)
 -}

@@ -393,7 +393,7 @@ compileOps expr = listArray (0, nOps-1) $ reverse ops
 type Compile e a = S.State (CompileState e) a
 data CompileState a
   = CompileState
-    { cIdToOperation   :: !(IntMap Int) -- ^ Expr id to operation index map
+    { cIdToOperation   :: !(IntMap I) -- ^ Expr id to operation index map
     , cConstants       :: !(Map (SCmp a) I)
     , cOperations      :: ![Operation a]
     , cTotalOperations :: !Int
@@ -407,7 +407,7 @@ data CSEState a
   = CSEState
     { cseExprIdMap    :: !(IntMap (IndexedExpr a)) -- ^ Expr id to common expr
     , cseCExprMap     :: !(Map (CExpr a) (IndexedExpr a))
-    , cseCurrentIndex :: !Int
+    , cseCurrentIndex :: !I
     }
   deriving Show
 data IndexedExpr a
@@ -667,9 +667,9 @@ factor = \ case
 ------------------------------------------------------------------------------
 -- Instances
 
--- That's ugly, we have a "symbolic" expression, yet it contains
--- 'Double's, lifted numbers and compared by converting to 'Double'
--- (that can fail if we don't have all variables).
+-- It's ugly, we have a "symbolic" expression, yet it contains
+-- 'Double's, lifted numbers and is compared by converting to a 'Double'
+-- (the conversion can fail if we don't have all variables).
 --
 -- OTOH we need to use @Expr (R.Reverse s Double)@ and don't care
 -- about passing variable mappings (hence 'EmbeddedVar') and

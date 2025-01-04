@@ -1,6 +1,13 @@
 #+STARTUP: indent
 
 * Local-vol, make sure mc/fem match bs with implied vol
+** local vol via a grid instead of a symbolic expr
+Should be much faster (no hessians and symbolic matrix inversions,
+much simpler derivatives and smaller AD dependencies/RAM usage).
+Shouldn't loose much precision as we discretize time and spot in FEM
+anyway (it could in fact have an even better precision as the
+derivative will be computed on the same grid as FEM and can match
+FEM calculations better than instantaneous derivative)
 ** extend Expr with @if x ~ y then e1 else e2@
 where we differentiate both branches.
 We can then safely use SABR
