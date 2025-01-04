@@ -47,6 +47,11 @@ class (NFData a, Show a, Erf a, Ord a, StructuralOrd a) => N a where
 
   dLevel :: a -> DLevel
 
+  isZero :: a -> Bool
+--   isZero = structuralEq 0
+  isOne :: a -> Bool
+--   isOne = structuralEq 1
+
 data DLevel
   = DLNone  -- ^ can't be differentiated, 'explicitD' is no-op
   | DL1st   -- ^ can have 1st order derivative, 'explicitD' only honors jacobian
@@ -71,6 +76,8 @@ instance N Double where
   partials _ = []
   explicitD _ _ _ = id
   dLevel _ = DLNone
+  isZero = (== 0)
+  isOne  = (== 1)
 instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   exprType _ = "R.Reverse s (" <> exprType (undefined :: a) <> ")"
   step = J.lift1 step
@@ -91,3 +98,12 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   toN = R.auto . toN
   toD = toD . R.primal
   dLevel _ = DL1st
+
+  isZero = \ case
+    R.Zero -> True
+    R.Lift x -> isZero x
+    R.Reverse{} -> False
+  isOne = \ case
+    R.Zero -> False
+    R.Lift x -> isOne x
+    R.Reverse{} -> False

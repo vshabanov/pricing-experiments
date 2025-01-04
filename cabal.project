@@ -1,9 +1,13 @@
 packages:
   *.cabal
 
+-- package ad
+--   ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS -finfo-table-map -fdistinct-constructor-tables
+
 package pricing-experiments
   optimization: 2
   ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS
+--                -finfo-table-map -fdistinct-constructor-tables
 --               -fno-unoptimized-core-for-interpreter
 --   profiling: True
 --   profiling-detail: all-functions

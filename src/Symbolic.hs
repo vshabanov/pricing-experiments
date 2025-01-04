@@ -12,7 +12,7 @@ module Symbolic
   , eval
   , diff
   , simplify
-  , compile
+  , compile, compileOps
   , toMaxima
 
   , testSymbolic
@@ -258,8 +258,8 @@ diffVar expr by = S.evalState (d expr) IntMap.empty
                --   v' = v1' * (v2 - e v2) + v2' * (v1 - e v1)
                let v' = dvs!v1 * vmes!v2 + dvs!v2 * vmes!v1
                in
-                 if | SCmp v' == 0 -> []
-                    | otherwise    -> [(dv12, v')]
+                 if | isZero v' -> []
+                    | otherwise -> [(dv12, v')]
         pure $ if null j then a else
           explicitD (map snd j) (zip (map fst j) [0..]) [] a
     binOp op a b = do
@@ -316,26 +316,28 @@ data Operation a
   = OVar VarId
   | OTag !I -- ^ redirect to another index
   | OConst a
-  | OBinOp !(a -> a -> a) !I !I
-  | OUnOp !(a -> a) !I
+  | OBinOp !BinOp !I !I
+  | OUnOp !UnOp !I
   | OExplicitD
     [I]             -- ^ variables
     [(I, Int)]      -- ^ jacobian [(∂x/∂var, var)]
     [(I, Int, Int)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
     !I
---   deriving Show
+   deriving Show
 
 evalOps :: N a => Array Int (Operation a) -> (VarId -> a) -> a
-evalOps ops subst = r!hi
+evalOps ops subst = r `deepseq` r!hi
+  -- deepseq gives a 1.5x speedup on fem. The shallow seq on elements
+  -- is not enough -- we need 'a' inside the 'Reverse' to be fully evaluated
   where
-    (lo, hi) = bounds r -- TODO: runST and evaluate the array sequentially
+    (_, hi) = bounds r
     r = amap e ops
     e = \ case
       OVar v -> subst v
       OTag i -> r!i
       OConst x -> x
-      OBinOp f a b -> f (r!a) (r!b)
-      OUnOp f a -> f (r!a)
+      OBinOp op a b -> binOp op (r!a) (r!b)
+      OUnOp op a -> unOp op (r!a)
       OExplicitD v j h a ->
         mapExplicitD explicitD (r!) v j h a
 
@@ -347,8 +349,8 @@ evalOps ops subst = r!hi
 compileOps :: N a => Expr a -> Array Int (Operation a)
 compileOps expr = listArray (0, nOps-1) $ reverse ops
   where
-    CompileState _ ops nOps =
-      S.execState (go expr) (CompileState IntMap.empty [] 0)
+    CompileState _ _ ops nOps =
+      S.execState (go expr) (CompileState IntMap.empty Map.empty [] 0)
     go :: N a => Expr a -> Compile a Int
     go = \ case
       Var i v -> o i $ pure $ OVar v
@@ -356,9 +358,9 @@ compileOps expr = listArray (0, nOps-1) $ reverse ops
       Tag i _ _ e -> o i $ OTag <$> go e
       Const x -> lit x
       BinOp i (Just x) _ _ _ -> iconst i x
-      BinOp i _ op a b -> o i $ liftM2 (OBinOp $ binOp op) (go a) (go b)
+      BinOp i _ op a b -> o i $ liftM2 (OBinOp op) (go a) (go b)
       UnOp i (Just x) _ _ -> iconst i x
-      UnOp i _ op a -> o i $ OUnOp (unOp op) <$> go a
+      UnOp i _ op a -> o i $ OUnOp op <$> go a
       ExplicitD i (Just x) _ _ _ _ -> iconst i x
       ExplicitD i _ v j h a -> o i $ mapMExplicitD OExplicitD go v j h a
     o :: I -> Compile a (Operation a) -> Compile a Int
@@ -367,20 +369,32 @@ compileOps expr = listArray (0, nOps-1) $ reverse ops
       case IntMap.lookup i im of
         Nothing -> do
           !op <- act
-          S.state $ \ (CompileState m ops nOps) ->
-            (nOps, CompileState (IntMap.insert i nOps m) (op:ops) (nOps+1))
+          S.state $ \ (CompileState m cs ops nOps) ->
+            (nOps, CompileState (IntMap.insert i nOps m) cs (op:ops) (nOps+1))
         Just oi ->
           pure oi
-    iconst i x = o i $ pure $ OConst x
+    iconst i x = do
+      im <- S.gets cIdToOperation
+      case IntMap.lookup i im of
+        Nothing -> do
+          !oi <- lit x
+          S.state $ \ (CompileState m cs ops nOps) ->
+            (oi, CompileState (IntMap.insert i oi m) cs ops nOps)
+        Just oi ->
+          pure oi
     -- add a literal constant without the Expr id mapping
-    lit :: a -> Compile a Int
-    lit c = S.state $ \ (CompileState m ops nOps) ->
-      (nOps, CompileState m (OConst c:ops) (nOps+1))
+    lit :: StructuralOrd a => a -> Compile a Int
+    lit c = S.state $ \ s@(CompileState m cs ops nOps) ->
+      case Map.lookup (SCmp c) cs of
+        Just n -> (n, s)
+        Nothing ->
+          (nOps, CompileState m (Map.insert (SCmp c) nOps cs) (OConst c:ops) (nOps+1))
 
 type Compile e a = S.State (CompileState e) a
 data CompileState a
   = CompileState
     { cIdToOperation   :: !(IntMap Int) -- ^ Expr id to operation index map
+    , cConstants       :: !(Map (SCmp a) I)
     , cOperations      :: ![Operation a]
     , cTotalOperations :: !Int
     }
@@ -388,68 +402,93 @@ data CompileState a
 ------------------------------------------------------------------------------
 -- Common subexpression elimination
 
-cse :: (N a, StructuralOrd a) => Expr a -> Expr a
-cse e = snd $ S.evalState (go e) (Map.empty, IntMap.empty)
+type CSE e a = S.State (CSEState e) a
+data CSEState a
+  = CSEState
+    { cseExprIdMap    :: !(IntMap (IndexedExpr a)) -- ^ Expr id to common expr
+    , cseCExprMap     :: !(Map (CExpr a) (IndexedExpr a))
+    , cseCurrentIndex :: !Int
+    }
+  deriving Show
+data IndexedExpr a
+  = IE
+    { ieIndex :: !I
+    , ieExpr  :: Expr a
+      -- Expr is still lazy as we might only need index for comparisons
+    }
+  deriving Show
+
+runCSE :: CSE e a -> a
+runCSE act = S.evalState act (CSEState IntMap.empty Map.empty 0)
+
+cse :: N a => Expr a -> Expr a
+cse = ieExpr . runCSE . cse'
+
+-- | Equality via CSE
+-- More performant than a plain comparison as it handles sharing
+cseEq :: N a => Expr a -> Expr a -> Bool
+cseEq a b = runCSE $ do
+  IE ia _ <- cse' a
+  IE ib _ <- cse' b
+  pure $ ia == ib
+
+cse' :: N a => Expr a -> CSE a (IndexedExpr a)
+cse' e = go e
   where
     go = \ case
       Var i v -> m i $
         get (CVar v) (var v)
       Tag i _ v e -> m i $ do
-        (ce, se) <- go e
-        get (CTag v ce) (tag v se)
-      Const x ->
-        get (CConst $ SCmp x) (Const x)
+        IE ie se <- go e
+        get (CTag v ie) (tag v se)
+      c@(Const x) ->
+        get (CConst $ SCmp x) c
       BinOp i _ op a b -> m i $ do
-        (ca, sa) <- go a
-        (cb, sb) <- go b
-        get (CBinOp op ca cb) (mkBinOp op sa sb)
+        IE ia sa <- go a
+        IE ib sb <- go b
+        get (CBinOp op ia ib) (mkBinOp op sa sb)
       UnOp i _ op a -> m i $ do
-        (ca, sa) <- go a
-        get (CUnOp op ca) (mkUnOp op sa)
+        IE ia sa <- go a
+        get (CUnOp op ia) (mkUnOp op sa)
       ExplicitD i _ v j h a -> m i $ do
-        (cv, sv) <- unzip <$> mapM go v
-        (ca, sa) <- go a
-        (cj, sj) <- fmap unzip $ for j $ \ (d,v) -> do
-          (cd, sd) <- go d
-          pure ((cd,v), (sd,v))
-        (ch, sh) <- fmap unzip $ for h $ \ (d,v1,v2) -> do
-          (cd, sd) <- go d
-          pure ((cd,v1,v2), (sd,v1,v2))
-        get (CExplicitD cv cj ch ca) (explicitD sv sj sh sa)
+        (iv, sv) <- unzip . map (\ (IE i e) -> (i,e)) <$> mapM go v
+        IE ia sa <- go a
+        (ij, sj) <- fmap unzip $ for j $ \ (d,v) -> do
+          IE id sd <- go d
+          pure ((id,v), (sd,v))
+        (ih, sh) <- fmap unzip $ for h $ \ (d,v1,v2) -> do
+          IE id sd <- go d
+          pure ((id,v1,v2), (sd,v1,v2))
+        get (CExplicitD iv ij ih ia) (explicitD sv sj sh sa)
+    get :: StructuralOrd a => CExpr a -> Expr a -> CSE a (IndexedExpr a)
     get cexpr mkexpr = do
-      (m,im) <- S.get
-      case Map.lookup cexpr m of
+      em <- S.gets cseCExprMap
+      case Map.lookup cexpr em of
         Nothing -> do
-          S.put (Map.insert cexpr mkexpr m, im)
-          pure (cexpr, mkexpr)
-        Just e -> pure (cexpr, e)
+          S.state $ \ (CSEState im em idx) ->
+            let r = IE idx mkexpr in
+            (r, CSEState im (Map.insert cexpr r em) (succ idx))
+        Just e -> pure e
+    m :: I -> CSE a (IndexedExpr a) -> CSE a (IndexedExpr a)
     m i act = do
-      (_,im) <- S.get
+      im <- S.gets cseExprIdMap
       case IntMap.lookup i im of
         Nothing -> do
           r <- act
-          S.modify $ \ (m,im) -> (m, IntMap.insert i r im)
-          pure r
+          S.state $ \ (CSEState im em idx) ->
+            (r, CSEState (IntMap.insert i r im) em idx)
         Just r ->
           pure r
 
 -- 'Expr' that can be used as a key for the common subexpression elimination
 data CExpr a
   = CVar VarId
-  | CTag VarId (CExpr a)
+  | CTag VarId !I
   | CConst (SCmp a)
-  | CBinOp BinOp (CExpr a) (CExpr a)
-  | CUnOp UnOp (CExpr a)
-  | CExplicitD [CExpr a] [(CExpr a, Int)] [(CExpr a, Int, Int)] (CExpr a)
+  | CBinOp BinOp !I !I
+  | CUnOp UnOp !I
+  | CExplicitD [I] [(I, Int)] [(I, Int, Int)] !I
   deriving (Eq, Ord, Show)
-
-toCExpr = \ case
-  Var _ v -> CVar v
-  Tag _ _ v e -> CTag v $ toCExpr e
-  Const c -> CConst $ SCmp c
-  BinOp _ _ op a b -> CBinOp op (toCExpr a) (toCExpr b)
-  UnOp _ _ op a -> CUnOp op (toCExpr a)
-  ExplicitD _ _ v j h a -> mapExplicitD CExplicitD toCExpr v j h a
 
 mapExplicitD c f v j h a = c
   (map f v)
@@ -644,18 +683,22 @@ instance N a => Ord (Expr a) where
   a `compare` b = toD a `compare` toD b
 
 -- default 'Eq', could it be derived in some way?
-instance StructuralEq a => StructuralEq (Expr a) where
+instance N a => StructuralEq (Expr a) where
   structuralEq a b = case (a, b) of
     (Var ia a, Var ib b) -> ia == ib || a == b
     (Tag ia _ ta ea, Tag ib _ tb eb) -> ia == ib || ta == tb && structuralEq ea eb
     (Const a, Const b) -> structuralEq a b -- but NaN /= NaN
-    (BinOp ia _ oa a1 a2, BinOp ib _ ob b1 b2) -> ia == ib ||
-      oa == ob && structuralEq a1 b1 && structuralEq a2 b2
     (UnOp ia _ oa a, UnOp ib _ ob b) -> ia == ib ||
       oa == ob && structuralEq a b
+    (BinOp ia _ oa a1 a2, BinOp ib _ ob b1 b2) -> ia == ib ||
+      oa == ob && structuralEq a1 b1 && structuralEq a2 b2
     (ExplicitD ia _ va ja ha a, ExplicitD ib _ vb jb hb b) -> ia == ib ||
       structuralEq va vb && structuralEq ja jb &&
       structuralEq ha hb && structuralEq a b
+--     (BinOp ia _ oa _ _, BinOp ib _ ob _ _) -> ia == ib || oa == ob && cseEq a b
+--     (ExplicitD ia _ _ _ _ _, ExplicitD ib _ _ _ _ _) -> ia == ib || cseEq a b
+    -- cseEq is slightly slower in our case
+
     -- to have a warning when new cases are added:
     (Var{}, _) -> False
     (Tag{}, _) -> False
@@ -672,29 +715,37 @@ foldBinOp op a b = mkBinOp op a b
 
 mkBinOp op a b = withNewId $ \ i ->
   BinOp i (liftA2 (binOp op) (evalMaybe a) (evalMaybe b)) op a b
+--   BinOp i c op a b
+--   where c = do
+--           !ea <- evalMaybe a
+--           !eb <- evalMaybe b
+--           pure $! binOp op ea eb
+-- slower, more allocations
 
 foldUnOp op (Const a) = Const $ unOp op a
 foldUnOp op a = mkUnOp op a
 
 mkUnOp op a = withNewId $ \ i -> UnOp i (unOp op <$> evalMaybe a) op a
+-- mkUnOp op a = withNewId $ \ i -> UnOp i c op a
+--   where c = do
+--           !ea <- evalMaybe a
+--           pure $! unOp op ea
 
 instance N a => Num (Expr a) where
   a + b
-   | SCmp a == 0 = b
-   | SCmp b == 0 = a
-   | otherwise   = foldBinOp Plus a b
+   | isZero a  = b
+   | isZero b  = a
+   | otherwise = foldBinOp Plus a b
   a - b
-   | SCmp a == 0 = -b
-   | SCmp b == 0 = a
-   | otherwise   = foldBinOp Minus a b
+   | isZero a  = -b
+   | isZero b  = a
+   | otherwise = foldBinOp Minus a b
   a * b
-   | SCmp a == 0 = 0
-   | SCmp b == 0 = 0
-   | SCmp a == 1 = b
-   | SCmp b == 1 = a
-   | SCmp a == -1 = negate b
-   | SCmp b == -1 = negate a
-   | otherwise   = foldBinOp Multiply a b
+   | isZero a  = 0
+   | isZero b  = 0
+   | isOne a   = b
+   | isOne b   = a
+   | otherwise = foldBinOp Multiply a b
 
   negate = foldUnOp Negate
 
@@ -705,10 +756,9 @@ instance N a => Num (Expr a) where
 
 instance N a => Fractional (Expr a) where
   a / b
---   | structuralEq a b = 1
-   | SCmp b == 1 = a
---   | SCmp a == 0 && SCmp b /= 0 = 0
-   | otherwise   = foldBinOp Divide a b
+   | isOne b   = a
+--   | isZero a && SCmp b /= 0 = 0
+   | otherwise = foldBinOp Divide a b
 
   fromRational = Const . fromRational
 
@@ -732,8 +782,8 @@ instance N a => Floating (Expr a) where
   atanh = foldUnOp ATanh
 
   a ** b
-   | SCmp b == 0 = 1
-   | otherwise   = foldBinOp Expt a b
+   | isZero b  = 1
+   | otherwise = foldBinOp Expt a b
 --   logBase = foldBinOp LogBase
 
 --     log1p x = log (1 + x)
@@ -745,8 +795,9 @@ instance N a => Erf (Expr a) where
   erf  = foldUnOp Erf
   erfc = foldUnOp Erfc
 
-instance StructuralOrd a => StructuralOrd (Expr a) where
-  structuralCompare = compare `on` toCExpr
+instance N a => StructuralOrd (Expr a) where
+  structuralCompare = error "StructuralOrd (Expr a) is not implemented"
+  -- need some magic with CSE to make it fast (to take the sharing into account)
 
 instance N a => N (Expr a) where
   exprType _ = "Expr (" <> exprType (undefined :: a) <> ")"
@@ -760,6 +811,12 @@ instance N a => N (Expr a) where
       m = mapMExplicitD explicitD evalMaybe v j h e
 
   dLevel _ = DLAny
+  isZero = \ case
+    Const x -> isZero x
+    _ -> False
+  isOne = \ case
+    Const x -> isOne x
+    _ -> False
 
 unsafeEval debugName =
   eval (\ v -> error $ "toD: undefined variable " <> show v)

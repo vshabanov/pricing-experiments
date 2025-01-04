@@ -338,7 +338,11 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
   Smile_
   { smileImpliedVol   = toFun $ impliedVol k
   , smileImpliedVol'k = toFun $ diff (impliedVol k) k
-  , smileLocalVol     = toFun $ localVol k
+  , smileLocalVol     =
+--     trace (show $ compileOps $
+--            -- showExprWithSharing $
+--            cse $ untag $ localVol k) $
+    toFun $ localVol k
   , smileLocalVol's   = toFun $ diff (localVol k) k
 --      (trace $ take 100000 $ showExprWithSharing localVol) $
   }
@@ -703,12 +707,11 @@ fem' nx nt market =
 --          [(iToLogSpot 0, 0)]
       zipWith (,) (map iToLogSpot [0..nx+1]) iteration
 --       <> [(iToLogSpot (nx+1), 0)]
-    iterations = take (nt+1) (iterate ump1 (u0,0))
+    iterations = take (nt+1) (iterate' ump1 (u0,0))
     τ = oMaturityInYears o - get PricingDate market
-    σ = σimp τ (oStrike o)
-    σimp = impliedVol market
-    σloc 0 = σimp (τ - iToT (nt-1))
+    σ = impliedVol market τ (oStrike o)
     σ̃loc t x = localVol market t (exp x)
+    -- no need to handle the t=0 case as the 'nt' step uses the 'nt-1' time.
     σ̃loc' t x = localVol's market t (exp x) * exp x
     rd = get RateDom market
     rf = get RateFor market
@@ -718,7 +721,8 @@ fem' nx nt market =
     ump1 :: ([a], Int) -> ([a], Int)
     ump1 (um,mi) =
       (trimSolve 0 0 -- (if mi > 30 && mi < 40 then 45 else 0)
-      (m .+ k mi*θ .* a_bs mi) ((m .- k mi*(1-θ) .* a_bs mi) #> um), succ mi)
+      (m .+ k mi*θ .* a) ((m .- k mi*(1-θ) .* a) #> um), succ mi)
+      where a = a_bs mi
 --       (i .+ k mi*θ .* g_bs) ((i .- k mi*(1-θ) .* g_bs) #> um), succ mi)
 --     nx = 500 :: Int
 --     nt = 500 :: Int
@@ -750,14 +754,17 @@ fem' nx nt market =
     u0 = [getPv market (const $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [0..nx+1]]
 
     -- FEM
---     α t _ = σ^2/2
---     β t _ = σ^2/2-rd+rf
+--     -- Flat vol
+--     α _ _ = σ^2/2
+--     β _ _ = σ^2/2-rd+rf
+    -- Local vol
     α t x = σ̃loc t x^2/2
     β t x = σ̃loc t x*σ̃loc' t x + σ̃loc t x^2/2-rd+rf
     γ _ = rd
 
     a_bs :: Int -> Tridiag a
     a_bs i = -- trimTridiag 1 1 $
+--       trace (printf "a_bs i=%3d t=%.4f iToT i=%.4f" i (toD t) (toD $ iToT i)) $
       tridiagFrom2x2Elements
       [s + b + m
       |i <- [1..nx+1]
@@ -833,7 +840,7 @@ main = do
 -- --  print $ fem mkt
 --   let (adDelta:_) = greeksAD
 --       femBumpDelta = dvdx' (\ m () -> fem m) mkt () Spot 0.00001
---   printf "femBumpDelta = %f, adDelta = %f, %s\n" femDelta adDelta (show $ pct femBumpDelta adDelta)
+--   printf "femBumpDelta = %f, adDelta = %f, %s\n" femBumpDelta adDelta (show $ pct femBumpDelta adDelta)
   let analyticPV = p mkt PV
       femPV = pv
   printf "femPV = %f, analyticPV = %f, %s\n" femPV analyticPV (show $ pct femPV analyticPV)
@@ -888,42 +895,3 @@ _main = defaultMain
     --  1000  1.3s  0.08                 1.7
     --  2000 17.8s  0.19                19.7           0.18
     -- 10000        3.8   -- not linear                4
---    x = x0 -- tridiag size 3 1 4 LA.<\> LA.ident size
---     b = (9 LA.>< 3)
---         [
---           1.0,   1.0,   1.0,
---           1.0,  -1.0,   2.0,
---           1.0,   1.0,   3.0,
---           1.0,  -1.0,   4.0,
---           1.0,   1.0,   5.0,
---           1.0,  -1.0,   6.0,
---           1.0,   1.0,   7.0,
---           1.0,  -1.0,   8.0,
---           1.0,   1.0,   9.0
---         ]
---    x0 = LA.triDiagSolve dL d dU (LA.ident size) -- b
-
-{-
-pkg load statistics;
-pkg load financial;
-r=0.05; sig=0.2; T=1; S0=110; K=100;
-N = 1:1000000;
-U = rand(1,max(N)); % uniform random variable
-Y = norminv(U); % inverts Normal cum. fn.
-S = S0*exp((r-sig^2/2)*T + sig*sqrt(T)*Y);
-F = exp(-r*T)*max(0,S-K);
-sum1 = cumsum(F); % cumulative summation of
-sum2 = cumsum(F.^2); % payoff and its square
-val = sum1./N;
-rms = sqrt(sum2./N - val.^2);
-
-[Call, Put] = blsprice (S0, K, r, T, sig)
-% err = european_call(r,sig,T,S0,K,'value') - val;
-err = Call - val;
-plot(N,err, ...
-N,err-3*rms./sqrt(N), ...
-N,err+3*rms./sqrt(N))
-axis([0 length(N) -1 1])
-xlabel('N'); ylabel('Error')
-legend('MC error','lower bound','upper bound')
--}

@@ -53,6 +53,8 @@ common common
   hs-source-dirs:
     src
   ghc-options: -rtsopts -with-rtsopts "-M8G"
+  -- -threaded
+  -- ^ slower GC, no par GC
 
 executable Test
   import: common
