@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs, DerivingStrategies, DeriveAnyClass #-}
 {-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 
 {- | Quick and dirty way to build computations based on modifiable inputs.
@@ -45,6 +45,8 @@ import Data.Map.Strict (Map)
 import Unsafe.Coerce
 import Data.MemoUgly
 import Debug.Trace
+import Control.DeepSeq
+import GHC.Generics (Generic)
 
 import Unique
 import Tenor
@@ -69,6 +71,8 @@ data Smile a
     , smileLocalVol     :: a -> a -- ^ strike -> local vol
     , smileLocalVol's   :: a -> a -- ^ strike -> d local vol / ds
     }
+  deriving Generic
+  deriving anyclass NFData
 
 impliedVol'k mkt = smileImpliedVol'k . get Smile mkt
 impliedVol   mkt = smileImpliedVol   . get Smile mkt
@@ -154,7 +158,7 @@ data Market n
   deriving Show
 
 newtype Recipe n a = Recipe { runRecipe :: S.State (Market n) a }
-  deriving (Functor, Applicative, Monad)
+  deriving newtype (Functor, Applicative, Monad)
 
 buildMarket r = S.execState (runRecipe r) $
   Market { mInputs = Map.empty, mNodes = Map.empty }

@@ -10,6 +10,7 @@ import qualified Data.Map.Strict as Map
 import Debug.Trace
 import Data.List.Split
 import Data.Foldable
+import Data.Array
 import Criterion.Main
 import Data.Maybe
 import Data.Tuple.Extra
@@ -20,7 +21,7 @@ import Control.Concurrent
 import Control.Concurrent.Async
 import System.IO.Unsafe
 import Text.Printf
-import qualified Numeric.AD.Mode.Reverse as R
+import qualified Numeric.AD.Mode.Reverse.Double as RD
 import Control.Comonad.Cofree
 import Data.MemoUgly
 import GHC.Conc
@@ -223,7 +224,7 @@ pv :: Double
 
 jacobianPvGreeks :: (forall a . N a => Market a -> a) -> (Double, [Double])
 jacobianPvGreeks pricer =
-  R.grad' (\ xs ->
+  RD.grad' (\ xs ->
     pricer $ modifyList (zip (map (coerceGet . fst) is) (map const xs)) mkt)
     (map snd is)
   where
@@ -319,7 +320,8 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
 --         ,("k25-d-C"   , k25dc)
 --         ,("k25-d-C-MS", k25dcMS)]]
 --       <>
---       [ printf "%-12s %10.7f" n (toD p) -- (show p)
+--       [ printf "%-12s %10.7f" n (toD p)
+--         -- printf "%-12s %s" n (take 100 $ show p)
 --       | (n::String,p) <-
 --         [("σatm", σatm)
 --         ,("σbf25", σbf25)
@@ -335,34 +337,37 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
 --         ,("c1 (or ρ) ", c1)
 --         ,("c2 (or ν) ", c2)
 --         ]]) $
+--   traceShow (unlift f) $ -- to check the AD tape size
+--  force -- only keep compiled expressions and GC everything else
+          -- no longer speeds things up with ad +ffi
   Smile_
   { smileImpliedVol   = toFun $ impliedVol k
   , smileImpliedVol'k = toFun $ diff (impliedVol k) k
-  , smileLocalVol     =
---     trace (show $ compileOps $
---            -- showExprWithSharing $
---            cse $ untag $ localVol k) $
-    toFun $ localVol k
+  , smileLocalVol     = toFun $ localVol k
   , smileLocalVol's   = toFun $ diff (localVol k) k
 --      (trace $ take 100000 $ showExprWithSharing localVol) $
   }
 {-
+λ> RD.grad (\ [t] -> (\m -> traceShowId $ localVol m t 1 + localVol m t 1) mkt) [1.1]
 λ> bumpDiff (\ t -> localVol mkt (1.1+t) 1) 0 0.0001
 2.201655918713727e-3
-λ> R.grad (\ [t] -> localVol mkt (1.1+t) 1) [0]
+λ> RD.grad (\ [t] -> localVol mkt (1.1+t) 1) [0]
 [2.201655812057629e-3]
 λ> localVol mkt 1.1 1
 -5.815826767965226e-3
 λ> bumpDiff (\ t -> impliedVol mkt (1.1+t) 1) 0 0.0001
 -5.815826784605349e-3
-λ> R.grad (\ [t] -> impliedVol mkt (1.1+t) 1) [0]
+λ> RD.grad (\ [t] -> impliedVol mkt (1.1+t) 1) [0]
 [-5.815826767966395e-3]
 -}
   where
     pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ impliedVol k * 100) (toD $ s*100)
     f = forwardRate rates t -- F_0,T
     kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
-    toFun e = memo (compile (cse $ untag e) . const . unSCmp) . SCmp
+    toFun e =
+--      trace (show $ bounds c) $
+      c `seq` memo (evalOps c . const . unSCmp) . SCmp
+      where c = compileOps $ cse $ untag e
 
     impliedVol k = smileFun f s t [c0,c1,c2] k -- with solved constants
     localVol k =
@@ -760,6 +765,19 @@ fem' nx nt market =
     -- Local vol
     α t x = σ̃loc t x^2/2
     β t x = σ̃loc t x*σ̃loc' t x + σ̃loc t x^2/2-rd+rf
+    -- the AD tape size:
+    -- imp=24
+    -- loc=579 loc'=1738
+    -- one row (579+1738)*2*100 = 463400  -- 2 for quadrature
+    -- an actual number is 655075  (177513 without loc')
+    -- (slightly more due to the tridiag solving and vol smile hessian)
+    -- ~32M for nx=100 nt=50, which somehow uses 4G of RAM?
+    -- 128 bytes (16 words) overhead?
+    -- with ReverseDouble 4G -> 1.3G
+    -- 40 bytes (5 words) overhead -- looks fine
+    -- but it's heap values, so the total RAM usage is 3.5G and GC takes a lot
+    -- ad +ffi, makes 1G _total_ RAM, ~10MB Haskell heap
+    -- 32 bytes (4 words) overhead and nothing else
     γ _ = rd
 
     a_bs :: Int -> Tridiag a

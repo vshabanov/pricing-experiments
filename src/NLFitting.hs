@@ -10,8 +10,8 @@ import Data.Foldable
 import Data.Reflection (Reifies)
 import qualified Numeric.LinearAlgebra as LA
 import qualified Control.Monad.State.Strict as S
-import qualified Numeric.AD.Mode.Reverse as R
-import qualified Numeric.AD.Internal.Reverse as R
+import qualified Numeric.AD.Mode.Reverse.Double as RD
+import qualified Numeric.AD.Internal.Reverse.Double as RD
 import Text.Printf
 import Data.MemoUgly
 import Data.Bifunctor
@@ -28,8 +28,8 @@ import Percent
 --fitTest :: [(Double, [Double])]
 fitTest :: N a => (Maybe a, [[Double]]) -- [[(String, Double)]])
 fitTest = d2xda2Bump `seq` (Just d2xda2Bump,
---            R.jacobian system is
-  R.jacobian (\ [a,b] ->
+--            RD.jacobian system is
+  RD.jacobian (\ [a,b] ->
     map (unlift . flip diff "a") (system [tag "a" (lift a), tag "b" (lift b)]))
     is
 --   [[toD $ diff (diff x "a") i | i <- ["a", "b"]]
@@ -183,20 +183,20 @@ fitSystem inputs guesses system0
     -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
     jResultsInputs = (- (LA.inv $ jr results)) <> ji inputsD
     jr = matrix m m . map snd . jrMemo
-    ji = matrix m n . R.jacobian (\ i -> system i (map toN results))
+    ji = matrix m n . RD.jacobian (\ i -> system i (map toN results))
 
     jrMemo :: [Double] -> [(Double, [Double])]
-    jrMemo = memo $ R.jacobian' (\ r -> system (map toN inputsD) r)
+    jrMemo = memo $ RD.jacobian' (\ r -> system (map toN inputsD) r)
 
     -- Same as above but also contains second order derivatives
     -- m x n = (∂o_𝑜/∂i_𝑖, (∂(∂o_𝑜/∂i_𝑖)/∂i_[1..n], ∂(∂o_𝑜/∂i_𝑖)/∂o_[1..m]))
 --    j :: S.M (Double, (Array Int Double, Array Int Double))
-    j = R.jacobian' ift (inputsD <> results)
+    j = RD.jacobian' ift (inputsD <> results)
 --    splitdido (dodi, splitAt n -> (dis,dos)) = (dodi, (dis,dos))
 --      (dodi, (listArray (0,n-1) dis, listArray (0,m-1) dos))
     ift
-      :: Reifies s R.Tape
-      => [R.Reverse s Double] -> S.M (R.Reverse s Double)
+      :: Reifies s RD.Tape
+      => [RD.ReverseDouble s] -> S.M (RD.ReverseDouble s)
     ift adInputs = -- ~60% of the time, mostly diff
                    -- 40% partials (from 'j')
       let (is, rs) = splitAt n adInputs
@@ -242,7 +242,7 @@ test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
        , d2gda2Bump
        )
   where
-    [fdgda, fdgdb] = R.grad (\ as -> fitSystemThrow1 as 0.5 f) [ia,ib]
+    [fdgda, fdgdb] = RD.grad (\ as -> fitSystemThrow1 as 0.5 f) [ia,ib]
     dgda = - (1/dx) * dfda
     dgdb = - (1/dx) * dfdb
     d2gda2Bump = bumpDiff (\ a -> bumpDiff (\ a -> nx a ib) a 0.00001) ia 0.00001

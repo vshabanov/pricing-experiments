@@ -8,6 +8,14 @@ Shouldn't loose much precision as we discretize time and spot in FEM
 anyway (it could in fact have an even better precision as the
 derivative will be computed on the same grid as FEM and can match
 FEM calculations better than instantaneous derivative)
+
+--> Most of the RAM is used by the AD tape for local vol functions,
+    not by IFT Hessian or matrix inversions.
+    For each grid point localVol adds 600 and localVol's adds 1700
+    tape elements (comparing to just 24 for impliedVol), so the
+    simplification of vol calculation at grid points should give a big
+    boost
+
 ** extend Expr with @if x ~ y then e1 else e2@
 where we differentiate both branches.
 We can then safely use SABR

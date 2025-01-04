@@ -1,8 +1,12 @@
+{-# LANGUAGE UndecidableInstances #-}
+--  ^ for Reifies s RD.Tape => StructuralOrd (RD.ReverseDouble s)
 module StructuralComparison where
 
 import Control.DeepSeq
 import Data.Number.Erf
+import Data.Reflection (Reifies)
 import qualified Numeric.AD.Internal.Reverse as R
+import qualified Numeric.AD.Internal.Reverse.Double as RD
 
 -- | Structural equality.
 -- @x == x^2@ for some @x@-es, but their derivatives are different
@@ -68,4 +72,26 @@ instance StructuralOrd a => StructuralOrd (R.Reverse s a) where
       R.Reverse{} -> LT
     R.Reverse a _ -> \ case
       R.Reverse b _ -> compare a b
+      _ -> GT
+
+instance StructuralEq (RD.ReverseDouble s) where
+  structuralEq a b = case (a, b) of
+    (RD.Zero, RD.Zero) -> True
+    (RD.Zero, _) -> False
+    (RD.Lift a, RD.Lift b) -> structuralEq a b
+    (RD.Lift _, _) -> False
+    (RD.ReverseDouble a _, RD.ReverseDouble b _) -> a == b
+    (RD.ReverseDouble _ _, _) -> False
+
+instance Reifies s RD.Tape => StructuralOrd (RD.ReverseDouble s) where
+  structuralCompare = \ case
+    RD.Zero -> \ case
+      RD.Zero -> EQ
+      _ -> LT
+    RD.Lift a -> \ case
+      RD.Zero -> GT
+      RD.Lift b -> structuralCompare a b
+      RD.ReverseDouble{} -> LT
+    RD.ReverseDouble a _ -> \ case
+      RD.ReverseDouble b _ -> compare a b
       _ -> GT

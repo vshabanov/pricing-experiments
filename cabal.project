@@ -1,7 +1,13 @@
 packages:
   *.cabal
 
--- package ad
+package ad
+--   flags: +ffi
+     -- Disabled for stability
+     -- gives 2x+ speedup by removing the GC overhead
+     -- and reduces the RAM usage 3-4 times
+     -- But -M8G no longer works and we can start swapping with
+     -- a lot of off-heap data.
 --   ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS -finfo-table-map -fdistinct-constructor-tables
 
 package pricing-experiments

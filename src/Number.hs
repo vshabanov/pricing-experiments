@@ -1,3 +1,5 @@
+{-# LANGUAGE UndecidableInstances #-}
+--  ^ for Reifies s RD.Tape => N (RD.ReverseDouble s)
 {-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 module Number where
 
@@ -7,6 +9,8 @@ import Data.Number.Erf
 import Data.Reflection
 import qualified Numeric.AD.Mode as R
 import qualified Numeric.AD.Mode.Reverse as R
+import qualified Numeric.AD.Mode.Reverse.Double as RD
+import qualified Numeric.AD.Internal.Reverse.Double as RD
 import qualified Numeric.AD.Internal.Reverse as R
 import qualified Numeric.AD.Jacobian as J
 import GHC.TypeError
@@ -107,3 +111,31 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
     R.Zero -> False
     R.Lift x -> isOne x
     R.Reverse{} -> False
+
+instance NFData (RD.ReverseDouble s) where
+  rnf !a = ()
+
+instance (Reifies s RD.Tape) => N (RD.ReverseDouble s) where
+  exprType _ = "RD.ReverseDouble s"
+  step = J.lift1 step
+    (\ x -> k / (exp (k*x) + exp (-k*x) + 2))
+  explicitD vars jacobian _hessian base =
+    base
+    +
+    sum [J.lift1 (const 0) (const $ RD.auto (RD.primal d)) (va ! var)
+        | (d, var) <- jacobian]
+    where
+      va = listArray (0, length vars-1) vars
+  partials = RD.partials
+  toN = RD.auto . toN
+  toD = RD.primal
+  dLevel _ = DL1st
+
+  isZero = \ case
+    RD.Zero -> True
+    RD.Lift x -> isZero x
+    RD.ReverseDouble{} -> False
+  isOne = \ case
+    RD.Zero -> False
+    RD.Lift x -> isOne x
+    RD.ReverseDouble{} -> False

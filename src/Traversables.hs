@@ -1,7 +1,9 @@
-{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE DeriveAnyClass, DerivingVia #-}
 module Traversables where
 
 import Data.Kind
+import Control.DeepSeq
+import GHC.Generics (Generic)
 
 class Traversable t => FromList (t :: Type -> Type) where
   fromList :: [a] -> t a
@@ -33,29 +35,29 @@ instance FromList T11 where
 
 -- | Traversable cons @T var traversable@
 data T t a = T a (t a)
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T1 a  = T1 { unT1 :: a }
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T2 a  = T2 a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T3 a  = T3 a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T4 a  = T4 a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T5 a  = T5 a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T6 a  = T6 a a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T7 a  = T7 a a a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T8 a  = T8 a a a a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T9 a  = T9 a a a a a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T10 a = T10 a a a a a a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T11 a = T11 a a a a a a a a a a a
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 
 newtype AppNum a = AppNum a
 

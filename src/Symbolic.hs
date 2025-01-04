@@ -12,7 +12,7 @@ module Symbolic
   , eval
   , diff
   , simplify
-  , compile, compileOps
+  , compile, compileOps, evalOps
   , toMaxima
 
   , testSymbolic
@@ -315,7 +315,7 @@ compile expr = evalOps (compileOps expr)
 data Operation a
   = OVar VarId
   | OTag !I -- ^ redirect to another index
-  | OConst a
+  | OConst !a
   | OBinOp !BinOp !I !I
   | OUnOp !UnOp !I
   | OExplicitD
@@ -323,7 +323,7 @@ data Operation a
     [(I, Int)]      -- ^ jacobian [(∂x/∂var, var)]
     [(I, Int, Int)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
     !I
-   deriving Show
+   deriving (Show, Generic, NFData)
 
 evalOps :: N a => Array Int (Operation a) -> (VarId -> a) -> a
 evalOps ops subst = r `deepseq` r!hi
@@ -347,7 +347,7 @@ evalOps ops subst = r `deepseq` r!hi
 -- 'IntMap'. The profiler shows a lot of allocations in 'm' and
 -- 'IntMap.insert', we're removing these allocations with 'compile'.
 compileOps :: N a => Expr a -> Array Int (Operation a)
-compileOps expr = listArray (0, nOps-1) $ reverse ops
+compileOps expr = force $ listArray (0, nOps-1) $ reverse ops
   where
     CompileState _ _ ops nOps =
       S.execState (go expr) (CompileState IntMap.empty Map.empty [] 0)
