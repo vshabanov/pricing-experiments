@@ -1,4 +1,4 @@
-{-# LANGUAGE MagicHash, ScopedTypeVariables, CPP, MultilineStrings #-}
+{-# LANGUAGE MagicHash, ScopedTypeVariables, CPP, MultilineStrings, TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
 
 module Main (module Main) where
@@ -39,6 +39,8 @@ import Bump
 import NLFitting
 import Traversables
 import Percent
+import VolSurface
+import FreeVars
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -205,6 +207,7 @@ greeksAD = snd $ jacobianPvGreeks (flip p PV)
 greeksADMonteCarlo = snd $ jacobianPvGreeks monteCarlo
 
 pv :: Double
+greeks :: [Double]
 (pv,greeks) = jacobianPvGreeks
   fem
 -- σ=0.3, rd=0.05, rf=0.03, nx=500, nt=500, spot=[0.050..20.086], h=0.011976
@@ -262,13 +265,7 @@ mkt = buildMarket $ do
         pure $ (\ [σatm, σrr25, σbf25, σrr10, σbf10] -> VolTableRow{..})
           <$> sequenceA inputs
   surf <- mapM rowNode testSurface
-  node Smile $ smileAtT <$> sequenceA surf <*> (Rates <$> s <*> rf <*> rd)
-
-instance (Show t, N a) => Show (VolTableRow t a) where
-  show (VolTableRow {..}) =
-    printf "%3s %7.3f %7.3f %7.3f %7.3f %7.3f"
-      (show t) (toD σatm) (toD σrr25) (toD σbf25)
-      (toD σrr10) (toD σbf10)
+  node VolSurface $ mkVolSurface <$> sequenceA surf <*> (Rates <$> s <*> rf <*> rd)
 
 g = forM_ [0.5] -- [0.01,0.02..2]
   $ \ t -> do
@@ -283,10 +280,19 @@ volSens f = putStrLn $ unlines
   ,let d = dvdx' (\ m () -> f m) mkt () v 0.000001
   ]
 
-smileAtT :: N a => [VolTableRow Tenor a] -> Rates a -> a -> Smile a
-smileAtT surface rates =
-  memo (\ t -> -- trace (exprType t) $
-         flip smile rates $ volTableRow surface t)
+mkVolSurface :: N a => [VolTableRow Tenor a] -> Rates a -> VolSurface a
+mkVolSurface volSurfaceMarks rates = VolSurface_{..}
+  where
+    volSurfaceSmiles =
+      map (flip volTableRowSmile rates . mapTenor tenorToYear) volSurfaceMarks
+    volSurfaceSmileAt = Memo $ smileAtT volSurfaceSmiles rates
+
+smileAtT :: N a => [SmileFun a] -> Rates a -> a -> Smile a
+smileAtT smiles rates =
+  memo (\ (tagVolT . lift -> t) -> -- trace (exprType t) $
+         smile (getSmiles t) (lift <$> rates) t)
+  where
+    getSmiles = smileInterpolator $ map (lift <$>) smiles
 -- bumping works, but it's only 6-7 times faster than the full AD version.
 -- smileAtT surface rates t =
 -- --  trace (printf "smileAtT %f" (toD t)) $
@@ -299,77 +305,23 @@ smileAtT surface rates =
 --     sUp   = sm (t+h)
 --     h = 0.0001
 
-mapTenor :: (a -> b) -> VolTableRow a c -> VolTableRow b c
-mapTenor f v@VolTableRow{t} = v { t = f t }
-
--- smile :: N a => VolTableRow a a -> Rates a -> Smile a
--- smile v@VolTableRow{t,σatm,σbf25,σrr25} rates@Rates{s,rf,rd} =
-smile :: N a => VolTableRow (Expr a) (Expr a) -> Rates a -> Smile a
-smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
---   | SCmp t == 0 =
-  =
---   trace (unlines $
---       [printf "t=%f" (toD t)]
---       <>
---       [ printf "%-12s %.8f  %.5f%%  %f" n (toD k) (toD $ impliedVol k * 100)
---         (toD $ bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t})
---       | (n::String,k) <-
---         [("k25-d-P"   , k25dp)
---         ,("k25-d-P-MS", k25dpMS)
---         ,("kDNS"      , kDNS)
---         ,("k25-d-C"   , k25dc)
---         ,("k25-d-C-MS", k25dcMS)]]
---       <>
---       [ printf "%-12s %10.7f" n (toD p)
---         -- printf "%-12s %s" n (take 100 $ show p)
---       | (n::String,p) <-
---         [("σatm", σatm)
---         ,("σbf25", σbf25)
---         ,("σrr25", σrr25)
---         ,("σ25dSS", σ25dSS)
---         ,("σ25dSS via smile", 1/2*(impliedVol k25dc + impliedVol k25dp) - impliedVol kDNS)
---         ,("t", t)
---         ,("f", f)
---         ,("v25dMS", v25dMS)
--- --         ,("vMS", vStrangle env k25dpMS (impliedVol k25dpMS) k25dcMS (impliedVol k25dcMS))
--- --         ,("vSS", vStrangle env k25dp   (impliedVol k25dp)   k25dc   (impliedVol k25dc))
---         ,("c0 (or σ0)", c0)
---         ,("c1 (or ρ) ", c1)
---         ,("c2 (or ν) ", c2)
---         ]]) $
---   traceShow (unlift f) $ -- to check the AD tape size
---  force -- only keep compiled expressions and GC everything else
-          -- no longer speeds things up with ad +ffi
+smile :: N a => (SmileFun (Expr a), SmileFun (Expr a), Expr a -> Expr a -> Expr a) -> Rates (Expr a) -> Expr a -> Smile a
+smile (sa, sb, interp) Rates{..} t =
   Smile_
   { smileImpliedVol   = toFun $ impliedVol k
   , smileImpliedVol'k = toFun $ diff (impliedVol k) k
   , smileLocalVol     = toFun $ localVol k
   , smileLocalVol's   = toFun $ diff (localVol k) k
---      (trace $ take 100000 $ showExprWithSharing localVol) $
   }
-{-
-λ> RD.grad (\ [t] -> (\m -> traceShowId $ localVol m t 1 + localVol m t 1) mkt) [1.1]
-λ> bumpDiff (\ t -> localVol mkt (1.1+t) 1) 0 0.0001
-2.201655918713727e-3
-λ> RD.grad (\ [t] -> localVol mkt (1.1+t) 1) [0]
-[2.201655812057629e-3]
-λ> localVol mkt 1.1 1
--5.815826767965226e-3
-λ> bumpDiff (\ t -> impliedVol mkt (1.1+t) 1) 0 0.0001
--5.815826784605349e-3
-λ> RD.grad (\ [t] -> impliedVol mkt (1.1+t) 1) [0]
-[-5.815826767966395e-3]
--}
   where
-    pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ impliedVol k * 100) (toD $ s*100)
-    f = forwardRate rates t -- F_0,T
-    kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
     toFun e =
 --      trace (show $ bounds c) $
       c `seq` memo (evalOps c . const . unSCmp) . SCmp
       where c = compileOps $ cse $ untag e
 
-    impliedVol k = smileFun f s t [c0,c1,c2] k -- with solved constants
+    impliedVol k = interp k k
+    -- interpolate kATM/P25/C25 vols and refit the smile
+
     localVol k =
 --  σ(K,T) = sqrt (2*(∂C/∂T + (rd-rf) K ∂C/∂K + rf C)/(K² ∂²C/∂K²))
       sqrt (2*(diff c t + (rd-rf)*k*dcdk + rf*c)/(k^2 * d²cdk²))
@@ -378,21 +330,102 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
         d²cdk² = diff dcdk k
         c = bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t}
     k = "k"
+
+mapTenor :: (a -> b) -> VolTableRow a c -> VolTableRow b c
+mapTenor f v@VolTableRow{t} = v { t = f t }
+
+volTableRowSmile :: N a => VolTableRow a a -> Rates a -> SmileFun a
+volTableRowSmile v@VolTableRow{t,σatm,σbf25,σrr25,σbf10,σrr10} (rates@Rates{s,rf,rd})
+--   | SCmp t == 0 =
+  =
+--   trace (unlines $
+--       [printf "t=%f" (toD t)]
+--       <>
+--       [ printf "%-12s %.8f  %.5f%%  %.6f %.6f" n (toD k) (toD $ impliedVol k * 100)
+--         (toD $ bs PV BS{k=k,d=Put ,σ=impliedVol k,s,rf,rd,t})
+--         (toD $ bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t})
+--       | (n::String,k) <-
+--         [
+-- --          ("k10-d-P"   , k10dp)
+-- --         ,("k10-d-P-MS", k10dpMS)
+--          ("k25-d-P"   , k25dp)
+-- --         ,("k25-d-P'"   , k25dp')
+--         ,("k25-d-P-MS", k25dpMS)
+--         ,("kDNS"      , kDNS)
+--         ,("k25-d-C"   , k25dc)
+-- --         ,("k25-d-C'"   , k25dc')
+--         ,("k25-d-C-MS", k25dcMS)
+-- --         ,("k10-d-C"   , k10dc)
+--         ,("k10-d-C-MS", k10dcMS)
+--         ]]
+--       <>
+--       [ printf "%-12s %10.7f" n (toD p)
+--         -- printf "%-12s %s" n (take 100 $ show p)
+--       | (n::String,p) <-
+--         [("σatm", σatm)
+--         ,("σbf25", σbf25)
+-- --         ,("σ25dSS", σ25dSS)
+--         ,("σrr25", σrr25)
+-- --         ,("σrr25actual", impliedVol k25dcMS - impliedVol k25dpMS)
+-- --         ,("σbf25actual", (impliedVol k25dcMS + impliedVol k25dpMS)/2 - σatm)
+--         ,("σbf10", σbf10)
+-- --         ,("σ10dSS", σ10dSS)
+--         ,("σrr10", σrr10)
+--         ,("t", t)
+--         ,("f", f)
+--         ,("v25dMS", v25dMS)
+--         ,("v10dMS", v10dMS)
+--         ,("vMS", vStrangle k25dpMS (impliedVol k25dpMS) k25dcMS (impliedVol k25dcMS))
+--         ,("vSS", vStrangle k25dp   (impliedVol k25dp)   k25dc   (impliedVol k25dc))
+--         ,("σatm error", impliedVol kDNS === σatm)
+--         ,("σrr25 error", impliedVol k25dc === impliedVol k25dp + σrr25)
+-- --         ,("σrr10 error", impliedVol k10dc === impliedVol k10dp + σrr10)
+--         ,("v25MS error", vStrangle k25dpMS (impliedVol k25dpMS) k25dcMS (impliedVol k25dcMS) === v25dMS)
+--         ,("v10MS error", vStrangle k10dpMS (impliedVol k10dpMS) k10dcMS (impliedVol k10dcMS) === v10dMS)
+--         ,("c0 (or σ0)", c0)
+--         ,("c1 (or ρ) ", c1)
+--         ,("c2 (or ν) ", c2)
+--         ]]) $
+--   traceShow (unlift f) $ -- to check the AD tape size
+--   force -- only keep compiled expressions and GC everything else
+        -- no longer speeds things up with ad +ffi
+        -- but uses much less memory when a lot of smiles are cached
+--   traceShow (liftA2 pct (toD <$> cs) (toD <$> csRefit)) $
+  smileFun f s t cs
+--   , smileFittingPoints = map (both unlift)
+--     [(kDNS, σatm)
+--     ,(k25dpMS, σatm + σbf25 - σrr25/2)
+--     ,(k25dcMS, σatm + σbf25 + σrr25/2)
+-- --     ,(k10dpMS, σatm + σbf10 - σrr10/2)
+-- --     ,(k10dcMS, σatm + σbf10 + σrr10/2)
+--     ,(k25dp, σatm + σ25dSS - σrr25/2)
+--     ,(k25dc, σatm + σ25dSS + σrr25/2)
+-- --     ,(k10dp, σatm + σ10dSS - σrr10/2)
+-- --     ,(k10dc, σatm + σ10dSS + σrr10/2)
+--     ]
+  where
+    pi n k s = printf "%-12s %.4f  %.5f%% (table %.5f%%)" n (toD k) (toD $ impliedVol k * 100) (toD $ s*100)
+    f = forwardRate rates t -- F_0,T
+    kDNS = f * exp (1/2 * σatm^2 * t) -- K_DNS;pips
+
+    impliedVol k = smile f s t cs k
     g :: N a => T3 a
+    smile f s t cs k = smileVol (smileFun f s t cs) k
 --     g = T3 (-2) (-0.1) 0.1
---     smileFun f s t [c0,c1,c2] k = polynomialInDeltaExpC0 f t [c0,c1,c2] k
+--     smileFun f _s t (T3 c0 c1 c2) = PolynomialInDelta{f,t,c0,c1,c2}
     -- Converges on the vol table, and on BF=RR=0
     -- but fails on BF=1% and RR=0 or some other number
-    -- seems that polynomialInDeltaExpC0 is not flexible enough
+    -- seems that polynomialInDelta is not flexible enough
     -- for pure symmetric smiles.
     g = T3 0.1 0.1 0.1
-    smileFun f s t [c0,c1,c2] k = sabr s t [c0,c1,c2] k
+    smileFun _f f0 t (T3 σ0 ρ ν) = SABR{f0,t,σ0,ρ,ν}
+    delta d k = bs Delta BS{k,d,σ=impliedVol k,s,rf,rd,t}
     -- with β=1
-    -- Handles BF=RR=0 with error ~1e-7..1e-9 (bigger than polynomialInDeltaExpC0)
+    -- Handles BF=RR=0 with error ~1e-7..1e-9 (bigger than polynomialInDelta)
     -- shows almost flat line with numerical noise
     -- Handles BF=1% RR=0 and other RRs well
     -- smile doesn't have flat wings
-    -- About 2.2x times slower than polynomialInDeltaExpC0
+    -- About 2.2x times slower than polynomialInDelta
     -- with β=0 errors <1e-10 and about 1.8x slower
     -- BF=RR=0 is not flat at wings but looks flat in -25D..25D range
     -- Huge volatility in wings in smaller tenors,
@@ -401,51 +434,72 @@ smile v@VolTableRow{t,σatm,σbf25,σrr25} (fmap lift -> rates@Rates{s,rf,rd})
     ϕRR :: Num a => a
     ϕRR = 1 -- convention, could be -1
 
-    -- input variables passed between solvers
-    #define env (T11 f s rf rd t σatm σrr25 kDNS k25dpMS k25dcMS v25dMS)
+--     (k25dp', k25dc') = kpcSmile 0.25
+--     (k10dp, k10dc) = kpcSmile 0.10
+--     kpcSmile delta = (kForDeltaSmile Put (-delta), kForDeltaSmile Call delta)
+--     kForDeltaSmile direction delta =
+--       $(fitSystemQ1 [| kDNS |] [| \ k ->
+--         bs (id deltaConv) BS{k,d=id direction,t,s,rf,rd
+--                             ,σ=id smile f s t (T3 c0 c1 c2) k} === delta |])
 
-    T5 c0 c1 c2 k25dp k25dc = fitSS env σ25dSS
+    -- for *MS we have the same fit for SABR β=0,
+    -- and -200% on c1,c2 for SABR β=1, but the graph looks the same
+--     csRefit = $(fitSystemQ [| g |] [| \ cs ->
+--       let sm = id smile f s t cs
+--       in
+--       [ sm kDNS === σatm
+--       , sm k25dp === σatm + σ25dSS - σrr25/2
+--       , sm k25dc === σatm + σ25dSS + σrr25/2
+--       ] |])
 
-    [σ25dSS] = -- [σbf25]
-      fitSystemThrow env [σbf25] $ \ env [σ25dSS] ->
-      let T5 c0 c1 c2 _k25dp _k25dc = fitSS env σ25dSS
-          sm = smileFun f s t [c0,c1,c2]
-      in
-        [vStrangle env k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS]
-    fitSS env σ25dSS =
---      trace (show ("fitSS", toD σ25dSS)) $
-      let T3 g0 g1 g2 = g in
-      fitSystemThrow (T σ25dSS env) (T5 g0 g1 g2 k25dpMS k25dcMS)
-                 $ \ (T σ25dSS env) (T5 c0 c1 c2 k25dp   k25dc) ->
-      let sm = smileFun f s t [c0,c1,c2]
-          delta d k = bs Delta BS{k,d,σ=sm k,s,rf,rd,t}
-          -- PipsForwardDelta
+    -- smile strangle volatilities
+--     σ25dSS = 1/2*(impliedVol0 k25dc + impliedVol0 k25dp) - impliedVol0 kDNS
+--     σ10dSS = 1/2*(impliedVol k10dc + impliedVol k10dp) - impliedVol kDNS
+
+    -- TODO: fit 25d and 10d separately, then combine
+    --       for SABR we might be able to interpolate c1 c2 between 25d and 10d
+    TT cs@(T3 c0 c1 c2) (T2 k25dp k25dc) =
+      $(fitSystemQ [| TT g  (T2 k25dpMS k25dcMS) |] [|
+                   \ (TT cs (T2 k25dp k25dc)) ->
+--       traceShow (cs, σatm, σ25dSS) $
+      let sm = id smile f s t cs
+          delta d k = bs (id deltaConv) BS{k,d,σ=sm k,s,rf,rd,t}
       in
       [ sm kDNS === σatm
---       , ϕRR*(sm k25dc - sm k25dp) === σrr25
---       , 1/2*(sm k25dc + sm k25dp) - sm kDNS === σ25dSS
-      , sm k25dc === sm k25dp + σrr25
-      , 1/2*(sm k25dc + sm k25dp) === σatm + σ25dSS
-        -- Using σatm instead sm kDNS gives a better match between
-        -- bump and AD greeks. Better convergence?
+      , sm k25dc === sm k25dp + ϕRR*σrr25
       , delta Put  k25dp === -0.25 -- smile 25D, not Black-Scholes
       , delta Call k25dc ===  0.25
-        --  ^ reordered to use division in (===) for better error estimates
+        -- Despite k25dp/c are functions of 'cs' we can't solve them
+        -- during the search for 'cs' as there might be no solution,
+        -- so we add them here.
+      , id vStrangle_ RatesT{..}
+          k25dpMS (sm k25dpMS) k25dcMS (sm k25dcMS) === v25dMS
       ]
-    v25dMS = vStrangle env k25dpMS (σatm+σbf25) k25dcMS (σatm+σbf25)
-    vStrangle env kp σp kc σc =
+      |])
+
+    (k25dpMS, k25dcMS, v25dMS) = ms 0.25 (σatm+σbf25)
+    (k10dpMS, k10dcMS, v10dMS) = ms 0.10 (σatm+σbf10)
+
+    ms delta vol = (p, c, vStrangle p vol c vol)
+      where (p,c) = (kForDelta Put (-delta) vol, kForDelta Call delta vol)
+    kForDelta direction delta vol =
+      $(fitSystemQ1 [| kDNS |] [| \ k ->
+        bs (id deltaConv) BS{k,d=id direction,t,s,rf,rd,σ=vol} === delta |])
+
+    vStrangle = vStrangle_ RatesT{..}
+    vStrangle_ RatesT{s,rf,rd,t} kp σp kc σc =
         bs PV BS{k=kp,d=Put ,σ=σp,s,rf,rd,t}
       + bs PV BS{k=kc,d=Call,σ=σc,s,rf,rd,t}
 
-    #undef env
+    deltaConv = Delta
+{-
+λ> RD.grad (\ [t] -> (\m -> traceShowId $ localVol m t 1 + localVol m t 1) mkt) [1.1]
+λ> bumpDiff (\ t -> localVol mkt t 1) 1.1 0.0001
+2.201655918713727e-3
+λ> RD.grad (\ [t] -> localVol mkt t 1) [1.1]
+[2.201655812057629e-3]
+-}
 
-    #define env (T6 σatm σbf25 t s rf rd)
-
-    T2 k25dpMS k25dcMS =
-      fitSystemThrow env (T2 kDNS kDNS) $ \ env (T2 kp kc) ->
-        let delta d k = bs Delta BS{k,d,t,s,rf,rd,σ=σatm+σbf25} in
-        [delta Put  kp === -0.25
-        ,delta Call kc ===  0.25]
 
 iainsTable3_5 :: Fractional a => (String -> a -> a -> b) -> [b]
 iainsTable3_5 f0 =
@@ -459,21 +513,21 @@ iainsTable3_5 f0 =
 iainsDiff = mapM_ putStrLn $ iainsTable3_5 $ \ n k s ->
   printf "%-12s %.4f  %.2f%% (table %.2f%%, %9s)" n k (iains k * 100) (s*100)
   (show $ iains k `pct` s)
-iains x = polynomialInDeltaExpC0 1.3395163731662 1
+iains x = polynomialInDelta 1.3395163731662 1
 --  [-1.701005, 0.050131, 0.800801]
 --  ^ example in the book is wrong, values don't match iainsTable3_5
 --    but for SABR we're pretty close
-  [-1.4606627150883185,-1.0877333376976042,1.2259367762563833]
+  (-1.4606627150883185) (-1.0877333376976042) 1.2259367762563833
   --  ^ these have 0.034% error (0.024% max)
   x
 iainsCS :: [Double] =
   fitSystemThrow [] [-2,-0.1,0.1]
              $ \ [] [c0,c1,c2] ->
     iainsTable3_5 $ \ _ k σ ->
-      polynomialInDeltaExpC0 1.3395163731662 1 [c0,c1,c2] k === σ
+      polynomialInDelta 1.3395163731662 1 c0 c1 c2 k === σ
       -- doesn't converge, 1e-5 error
 
-polynomialInDelta f t [c0,c1,c2,c3] k = exp $ fun $ log (f / k)
+polynomialInDelta4 f t [c0,c1,c2,c3] k = exp $ fun $ log (f / k)
   where
     fun x = c0 + c1*δ x + c2*δ x^2 -- + c3*d x^3
     -- can't fit c3, maybe it'll work with rr10/bf10
@@ -499,16 +553,7 @@ testDiff = writeFile "test.maxima" $ unlines $
 --   ]
   where
     def n e = mconcat [n, ":", toMaxima e, "$"]
-    p = polynomialInDeltaExpC0 "f" "t" ["c0","c1","c2"] "x" :: Expr Double
-
-polynomialInDeltaExpC0 f t [c0,c1,c2] k =
---  c0 + c1*(f/k) + c2*(f/k)^2
---  ^ fits very nice, but has huge negative numbers on range ends
-  exp $ fun $ log (f / k)
-  where
-    fun x = c0 + c1*δ x + c2*δ x^2
-    σ0 = exp c0
-    δ x = normcdf (x / (σ0 * sqrt t))
+    p = polynomialInDelta "f" "t" "c0" "c1" "c2" "x" :: Expr Double
 
 infix 4 === -- same as ==
 
@@ -517,41 +562,34 @@ x === y = (x - y)/y  -- /y may cause division by zero
 -- | variable for 't'
 tagVolT = tag "volT"
 
-volTableRow :: N a => [VolTableRow Tenor a] -> a -> VolTableRow (Expr a) (Expr a)
-volTableRow surface = \ (tagVolT . lift -> t) -> case Map.splitLookup (toD t) rows of
-  (_, Just r, _) -> r { Analytic.t = t }
+smileInterpolator
+  :: N a
+  => [SmileFun a]  -- ^ list of smiles fitted for [VolTableRow a]
+  -> a             -- ^ time
+  -> (SmileFun a, SmileFun a, a -> a -> a) -- ^ (smileA, smileB, strikeA -> strikeB -> vol)
+smileInterpolator smiles = \ t -> case Map.splitLookup (toD t) rows of
+  (_, Just r, _) -> (r, r, const $ smileVol r)
     -- FIXME: interpolate both upper and lower sections with two
     --        crossing step functions to make on-pillar AD Theta
     --        closer to the bump Theta?
   (l, _, r) -> case (Map.lookupMax l, Map.lookupMin r) of
-    (Just (t1, r1), Just (t2, r2)) ->
-      let i w f = interp t t1 t2 w (f r1) (f r2) in
-        VolTableRow
-        { t = t
-        , σatm  = i "ATM" $ \VolTableRow{σatm} -> σatm
-        , σrr25 = -i "RR25" (\VolTableRow{σrr25} -> -σrr25)
-          -- TODO: it makes no sense to interpolate difference between volatilities
-          -- we should first calibrate two smiles, get kATM/P25/C25,
-          -- their vols, interpolate strikes and vols
-          -- and calibrate the new smile.
-          -- interpolate like all delta conventions are the same
-        , σbf25 = i "BF25" $ \VolTableRow{σbf25} -> σbf25
-        , σrr10 = i "RR10" $ \VolTableRow{σrr10} -> σrr10
-        , σbf10 = i "BF10" $ \VolTableRow{σbf10} -> σbf10
-        }
-    (Just (_,  r1), _            ) -> r1 { Analytic.t = t }
-    (_            , Just (t2, r2)) -> r2 { Analytic.t = t }
-    _ -> error "volTableRow: empty vol surface"
+    (Just (t1, s1), Just (t2, s2)) -> (s1, s2, interp t s1 s2)
+    (Just (_ , s1), _            ) -> (s1, s1, const $ smileVol s1)
+    (_            , Just (_ , s2)) -> (s2, s2, const $ smileVol s2)
+    _ -> error "smileInterpolator: empty vol surface"
   where
-    rows = Map.fromList
-      [(tenorToYear t, lift <$> r) | r@VolTableRow{..} <- surface]
-    interp t (toN -> t1) (toN -> t2) (what::String) v1 v2 =
+    rows = Map.fromList [(toD $ smileFunT s, s) | s <- smiles]
+    interp t s1 s2 k1 k2 =
       -- Iain Clark, p65, Flat forward interpolation
-      let v12 = (v2^2*t2 - v1^2*t1) / (t2 - t1) in
-      if toD v12 < 0 then
-        error $ printf "volTableRow: negative %s forward variance v12 = %.8f, t1=%f, v1=%f, t2=%f, v2=%f"
-          what (toD v12) (toD t1) (toD v1) (toD t2) (toD v2)
-      else
+      let t1 = smileFunT s1
+          t2 = smileFunT s2
+          v1 = smileVol s1 k1
+          v2 = smileVol s2 k2
+          v12 = (v2^2*t2 - v1^2*t1) / (t2 - t1) in
+--       if toD v12 < 0 then
+--         error $ printf "smileInterpolator: negative forward variance v12 = %.8f, t1=%f, k1=%f, v1=%f, t2=%f, k2=%f, v2=%f"
+--           (toD v12) (toD t1) (toD k1) (toD v1) (toD t2) (toD k2) (toD v2)
+--       else
         sqrt $ (v1^2*t1 + v12 * (t - t1)) / t
 
 testSurface :: N a => [VolTableRow Tenor a]
@@ -571,7 +609,7 @@ testSurface =
 --    6M  12.340  12.690   0      0      -3.132  1.460
    6M  12.340  12.690  -1.680  0.445  -3.132  1.460
 --    1Y  18.25   18.25   -0.6    0.95   -1.359  3.806 -- Table 3.3 p50
---    1Y   12.590  12.915   0  0 -3.158  1.743
+--    1Y   12.590  12.915   0  0.01 -3.158  1.743
 --    366D  12.590  12.915  0  0  -3.158  1.743
    1Y  12.590  12.915  -1.683  0.520  -3.158  1.743
   18M  12.420  12.750  -1.577  0.525  -3.000  1.735
@@ -649,21 +687,26 @@ volSmileCDF_LocalVol mkt t =
     dt = t / fromIntegral nt
 
 plot mkt = plotGraphs
-  $ map (p . volSmileCDF mkt) [0.1,0.15..1]
+  $ map smileVariance $ take 5 $ volSurfaceSmiles $ get VolSurface mkt
+--   $ map variance [0.1,0.15..1]
+--   $ map (p . volSmileCDF mkt) [0.1,0.15..1]
 --   [
 --    p $ volSmileCDF mkt t
---   ,volSmileCDF_LocalVol mkt t
+-- --   ,volSmileCDF_LocalVol mkt t
 -- --   ,p (impliedVol mkt 0)
 -- --   ,p (impliedVol mkt 0.0001)
 -- --   ,p (impliedVol mkt 0.001)
 -- --   ,p (impliedVol mkt 0.01)
 --   ,p (impliedVol mkt t)
+-- --   ,pointsStyle $ smileFittingPoints $ get Smile mkt t
 --   ]
   where
-    t = 1.1
-    p = functionPlot
-        1.3 1.4
---        0.5 (oStrike o + 1)
+    smileVariance s = p $ (\ v -> v^2 * smileFunT s) . smileVol s
+--     variance t = p $ (\ v -> v^2 * t) . impliedVol mkt t
+    t = 1
+    p = defaultStyle . functionPlot
+--         1.3 1.4
+        0.5 (oStrike o + 1)
         -- (oStrike o - 0.1) (oStrike o + 0.1)
 
 plot3d =
@@ -856,9 +899,9 @@ main = do
 -- --  printf "Analytic PV = %f, MC PV = %f, %s\n" a m (show $ pct a m)
 -- --  plot mkt
 -- --  print $ fem mkt
---   let (adDelta:_) = greeksAD
---       femBumpDelta = dvdx' (\ m () -> fem m) mkt () Spot 0.00001
---   printf "femBumpDelta = %f, adDelta = %f, %s\n" femBumpDelta adDelta (show $ pct femBumpDelta adDelta)
+  let (adDelta:_) = greeksAD
+      femBumpDelta = dvdx' (\ m () -> fem m) mkt () Spot 0.0001
+  printf "femBumpDelta = %f, adDelta = %f, %s\n" femBumpDelta adDelta (show $ pct femBumpDelta adDelta)
   let analyticPV = p mkt PV
       femPV = pv
   printf "femPV = %f, analyticPV = %f, %s\n" femPV analyticPV (show $ pct femPV analyticPV)
@@ -870,7 +913,7 @@ main = do
 --   where
 --     a = p mkt PV
 --     m = monteCarlo mkt
---   print $ zipWith pct greeksBumpFem greeks
+--   print $ force $ zipWith pct greeksBumpFem greeks
 --   print $ zipWith pct greeksBumpLocalVol greeksADLocalVol
 --   print (localVol mkt 1.1 1 :: Double)
 _main = defaultMain

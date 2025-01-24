@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 {-# OPTIONS_GHC -O2 #-}
 module NLFitting
   ( fitSystemThrow1
@@ -16,6 +18,7 @@ import Text.Printf
 import Data.MemoUgly
 import Data.Bifunctor
 import Numeric.GSL.Fitting
+import Debug.Trace
 
 import qualified Symbolic.Matrix as S
 import Solving
@@ -24,6 +27,11 @@ import Bump
 import Number
 import Traversables
 import Percent
+
+import Language.Haskell.TH
+import FreeVars
+import Data.Set (Set)
+import qualified Data.Set as Set
 
 --fitTest :: [(Double, [Double])]
 fitTest :: N a => (Maybe a, [[Double]]) -- [[(String, Double)]])
@@ -97,6 +105,25 @@ fitSystemThrow i o f =
   $ fitSystem (toList i) (toList o)
   $ \ ni no -> f (replace ni i) (replace no o)
 
+{- | For use with 'capture'
+
+  let x = 1
+      y = 2
+  in
+      fitSystemC [1] $(system [| \[g] -> [x + y + g] |])
+-}
+fitSystemC
+  :: (Traversable o, N a, Show a)
+  => o a -- ^ m guesses
+  -> System o a
+  -> o a -- ^ results with derivatives to inputs
+fitSystemC g (System i f) = fitSystemThrow i g f
+
+data System o a =
+  System
+  [a] -- ^ n inputs
+  (forall a . N a => [a] -> o a -> [a]) -- ^ n inputs -> m guesses -> m errors
+
 -- | Solve a system of non-linear equations for a set of inputs.
 --
 -- Uses Levenberg-Marquardt fitting from GSL with jacobians computed
@@ -115,7 +142,7 @@ fitSystem
      -- ^ n inputs -> m guesses -> m errors
   -> Either String [a] -- ^ results with derivatives to inputs
 fitSystem inputs guesses system0
-  | err > 1e-10 = -- Sum of squared residuals (sum . map (^2))
+  | err > 1e-9 = -- Sum of squared residuals (sum . map (^2))
     -- if there's a big error, there's a big chance that
     --  * LA.inv will fail with a singular matrix
     --  * LA.inv will not fail, but derivatives will be incorrect
@@ -138,7 +165,7 @@ fitSystem inputs guesses system0
   | otherwise =
 --   trace (show path) $
 --   map realToFrac results
---  trace (printf "%s %d x %d" (exprType proxy) m n) $
+--   trace (printf "%s %d x %d" (exprType proxy) m n) $
   Right $
     case dLevel proxy of
       DLNone -> map toN results
@@ -182,8 +209,14 @@ fitSystem inputs guesses system0
     -- Jacobian of results to inputs via the implicit function theorem
     -- https://en.wikipedia.org/wiki/Implicit_function_theorem#Statement_of_the_theorem
     jResultsInputs = (- (LA.inv $ jr results)) <> ji inputsD
-    jr = matrix m m . map snd . jrMemo
-    ji = matrix m n . RD.jacobian (\ i -> system i (map toN results))
+    jr = matrix m m . map (trim . snd) . jrMemo
+    jrNoTrim = (\ xs -> matrix (length xs) m xs) . map snd . jrMemo
+    ji = matrix m n . RD.jacobian (\ i -> trim $ system i (map toN results))
+
+    trim = id
+--     trim xs
+--       | length xs == m = xs
+--     trim (a:b:c:d:xs) = (a+b:c+d:xs)
 
     jrMemo :: [Double] -> [(Double, [Double])]
     jrMemo = memo $ RD.jacobian' (\ r -> system (map toN inputsD) r)
@@ -202,7 +235,7 @@ fitSystem inputs guesses system0
       let (is, rs) = splitAt n adInputs
           x = tagged "i" is
           y = tagged "g" rs
-          f = system x y
+          f = trim $ system x y
           -- symbolic jacobian, immediately converted back to AD
           fJ xs = unlift <$> S.jacobian f xs
       in
@@ -217,7 +250,7 @@ fitSystem inputs guesses system0
             -- fitting error can no longer be improved
       100 -- max iterations
       (LA.fromList . map fst . jrMemo . LA.toList)
-      (jr . LA.toList)
+      (jrNoTrim . LA.toList)
       (LA.fromList guessesD)
     inputsD = map toD inputs
     guessesD = map toD guesses
@@ -255,3 +288,11 @@ test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
     n a b = newton (\ as x -> f as x) [a, b] 0.5
     nx a b = let Right (x,_,_) = n a b in x
     f [a,b] x = a * cos x - b * x^3
+
+testCapture =
+--   fitSystemC [1] $(system [| \[g] -> [x + y + g] |])
+  $(fitSystemQ [|gs|] [| \[g] -> [x + y + g] |])
+  where
+    gs = [1]
+    x = 1
+    y = 2

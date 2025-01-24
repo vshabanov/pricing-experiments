@@ -124,7 +124,7 @@ lawOfIteratedLogarithm = sum (take n $ map (\x -> (toEnum . fromEnum) x*2-1) $ u
     n = 5000000
 
 plotg = plotGraphs
-  [histogramPlot 0.001
+  [defaultStyle $ histogramPlot 0.001
 --   $ map (\ e -> spotAtT mkt e 0.5)
    $ gaussian 50000]
 
@@ -138,7 +138,7 @@ pascalTriangleRow n
       zipWith (+) ([0]<>p) (p<>[0])
 
 plotp = plotGraphs
-  [[(toEnum i, fromRational $ x / sum p) | (i,x) <- zip [start..end] (drop start p)]]
+  [defaultStyle [(toEnum i, fromRational $ x / sum p) | (i,x) <- zip [start..end] (drop start p)]]
   where
     p :: [Rational]
     p = pascalTriangleRow n -- sum [Double] overlows at 1100

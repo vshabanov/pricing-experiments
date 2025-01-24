@@ -36,6 +36,7 @@ instance IsString Tenor where
     _ -> error $ "Bad tenor " <> show s
 
 -- | dumb tenor to 365 days year conversion, no calendar/spot rules
+tenorToYear :: Fractional a => Tenor -> a
 tenorToYear = \ case
   D x ->   fromIntegral x*d
   W x -> 7*fromIntegral x*d

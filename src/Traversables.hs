@@ -36,6 +36,8 @@ instance FromList T11 where
 -- | Traversable cons @T var traversable@
 data T t a = T a (t a)
   deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
+data TT t1 t2 a = TT { tt1 :: t1 a, tt2 :: t2 a }
+  deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T1 a  = T1 { unT1 :: a }
   deriving (Show, Functor, Foldable, Traversable, Generic, NFData)
 data T2 a  = T2 a a

@@ -2,7 +2,7 @@ packages:
   *.cabal
 
 package ad
---   flags: +ffi
+  flags: +ffi
      -- Disabled for stability
      -- gives 2x+ speedup by removing the GC overhead
      -- and reduces the RAM usage 3-4 times
@@ -13,6 +13,7 @@ package ad
 package pricing-experiments
   optimization: 2
   ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS
+  executable-dynamic: True
 --                -finfo-table-map -fdistinct-constructor-tables
 --               -fno-unoptimized-core-for-interpreter
 --   profiling: True

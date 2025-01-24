@@ -414,7 +414,7 @@ data IndexedExpr a
   = IE
     { ieIndex :: !I
     , ieExpr  :: Expr a
-      -- Expr is still lazy as we might only need index for comparisons
+      -- Expr is still lazy as we might only need the index for comparisons
     }
   deriving Show
 

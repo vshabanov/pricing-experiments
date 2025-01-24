@@ -13,7 +13,7 @@ import System.Process (spawnCommand)
 import Text.Printf (printf)
 
 plotf :: Double -> Double -> (Double -> Double) -> IO ()
-plotf a b f = plotGraphs [functionPlot a b f]
+plotf a b f = plotGraphs [defaultStyle $ functionPlot a b f]
 
 functionPlot :: Double -> Double -> (Double -> Double) -> [(Double, Double)]
 functionPlot from to f = [(x, f x) | x <- xs]
@@ -21,7 +21,13 @@ functionPlot from to f = [(x, f x) | x <- xs]
     n = 1000
     xs = map (\m -> from + (to-from) * fromIntegral m / fromIntegral n) [0..n]
 
-plotGraphs :: [[(Double, Double)]] -> IO ()
+type Style = String
+
+defaultStyle = ("lines",)
+pointsStyle = ("points",)
+-- circlesStyle = ("circles fs solid 0.25",)
+
+plotGraphs :: [(Style, [(Double, Double)])] -> IO ()
 plotGraphs graphs = do
   let script = "script.plot"
   writeFile script $ unlines $
@@ -34,12 +40,12 @@ plotGraphs graphs = do
     plot """
     <>
     intercalate ", "
-    [printf "'-' using 1:2 title 'graph %d' with lines" i
-    |(i,_) <- zip [0..] graphs]]
+    [printf "'-' using 1:2 title 'graph %d' with %s" i s
+    |(i,(s,_)) <- zip [0..] graphs]]
     <>
     -- specify data inline in the same script
     [unlines [unwords $ map show [x,y] | (x,y) <- g] <> "e\n"
-    |g <- graphs]
+    |(_,g) <- graphs]
   void $ spawnCommand $ "gnuplot " <> script
 
 plotMeshFun xs ys f =

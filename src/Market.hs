@@ -22,8 +22,7 @@ module Market
   ( -- * Market and its inputs
     Market
   , Get(..)
-  , VolInput(..)
-  , Smile(..), impliedVol, localVol, impliedVol'k, localVol's
+  , impliedVol, localVol, impliedVol'k, localVol's
     -- TODO: separate the market and inputs
     -- * Building a new market
   , buildMarket, input, node, Recipe, Node
@@ -50,6 +49,7 @@ import GHC.Generics (Generic)
 
 import Unique
 import Tenor
+import VolSurface
 
 -- | @Get n a@ some data from the @Market n@ with type @a@
 data Get n a where
@@ -62,34 +62,19 @@ data Get n a where
   PricingDate :: Get a a
 
   -- nodes
-  Smile :: Get a (a -> Smile a) -- ^ time -> smile
+  VolSurface :: Get a (VolSurface a)
 
-data Smile a
-  = Smile_
-    { smileImpliedVol   :: a -> a -- ^ strike -> implied vol
-    , smileImpliedVol'k :: a -> a -- ^ strike -> d implied vol / dk
-    , smileLocalVol     :: a -> a -- ^ strike -> local vol
-    , smileLocalVol's   :: a -> a -- ^ strike -> d local vol / ds
-    }
-  deriving Generic
-  deriving anyclass NFData
+smileAt :: Market a -> a -> Smile a
+smileAt mkt = unMemo $ volSurfaceSmileAt $ get VolSurface mkt
 
-impliedVol'k mkt = smileImpliedVol'k . get Smile mkt
-impliedVol   mkt = smileImpliedVol   . get Smile mkt
-localVol     mkt = smileLocalVol     . get Smile mkt
-localVol's   mkt = smileLocalVol's   . get Smile mkt
+impliedVol'k mkt = smileImpliedVol'k . smileAt mkt
+impliedVol   mkt = smileImpliedVol   . smileAt mkt
+localVol     mkt = smileLocalVol     . smileAt mkt
+localVol's   mkt = smileLocalVol's   . smileAt mkt
 
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)
 deriving instance Show (Get n a)
-
-data VolInput
-  = ATMVol
-  | RR25
-  | BF25
-  | RR10
-  | BF10
-  deriving (Show, Eq, Ord)
 
 newtype AnyGet = AnyGet (Get () ())
   deriving (Eq, Ord, Show)
@@ -202,4 +187,5 @@ mkt = buildMarket $ do
   input RateDom 0.1
   v1d <- input (Vol "1D" ATMVol) 0.1
   v1y <- input (Vol "1Y" ATMVol) 0.2
-  node Smile $ (\ v1 v2 t -> Smile_ (*(v1*v2*t)) (*t) (*t) (*t)) <$> v1d <*> v1y
+  pure ()
+--  node Smile $ (\ v1 v2 t -> Smile_ (*(v1*v2*t)) (*t) (*t) (*t) []) <$> v1d <*> v1y

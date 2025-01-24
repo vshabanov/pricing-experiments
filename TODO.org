@@ -30,10 +30,39 @@ standartized ATM, P25, C25 vols and solve smile for these vols and
 corresponding strikes
 ** Add BF10/RR10?
 ** Market conventions?
+* Fitting of curves and AD?
+does IFT works when we have 10 points but only 2-3 model parameters
+or when error is >> 0
 * Pay on touch fem/mc? Stoping time?
 * American FEM and monte carlo???
 * Chooser? Asian? TRF?
+Uwe says that TRF works even with localvol
 * Different model (CEV, SABR, Stochastic, Mixed local-vol & stochastic)
+https://thalesians.com/aiovg_videos/uwe-wystrup-mixed-local-volatility-models-for-fx-derivatives/
+49:20 -- summary of product-model correspondence
+
+Vanilla/European payoff -- BS + vol interpolation
+TRF no barrier -- dupire
+1st gen exotics (barrier, discrete barriers) -- local-vol mixture
+2nd gen (forward starting barrier, forward strikes, FVAs, cliquets)
+  -- local-vol mixture with state transitions
+options on realized volatility / variance -- stochastic local vol
+
+lv mix (or MLV) is 10 times faster than SLM.
+MLV has randomness at start and then has constant vol term structure
+(1D-1W const vol1, 1W-2W const vol2, etc.)
+unlike Heston it has no issues with calibration on short tenors where
+Heston has not enough volatility. Pure Heston is not recommended.
+
+** Stochastic Monte-Carlo
+Andersen scheme,
+Quadradic Exponential scheme (Uwe says it prevents process from
+jumping below zero,
+step size is at least one step a week,
+for barriers PDE is still a method of choice,
+for pegged currencies abandon SLV/MLV, and use local-vol with jumps
+(Travis Fisher presented it on math finance conference, can't find it)
+)
 * [MC] variance reduction
 * Payoff dependent mesh grading
 * [MC][parMap] Chunk jacobians, sumj . parMap grain=1 (jacobian . sum . Map pv path . Chunked gaussian)
