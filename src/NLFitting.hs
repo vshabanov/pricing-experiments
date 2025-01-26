@@ -2,7 +2,9 @@
 
 {-# OPTIONS_GHC -O2 #-}
 module NLFitting
-  ( fitSystemThrow1
+  ( fitSystemQ1
+  , fitSystemQ
+  , fitSystemThrow1
   , fitSystemThrow
   , fitSystem
   )
@@ -23,7 +25,7 @@ import Debug.Trace
 import qualified Symbolic.Matrix as S
 import Solving
 import Symbolic
-import Bump
+import Bump.Pure
 import Number
 import Traversables
 import Percent
@@ -289,10 +291,20 @@ test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
     nx a b = let Right (x,_,_) = n a b in x
     f [a,b] x = a * cos x - b * x^3
 
-testCapture =
---   fitSystemC [1] $(system [| \[g] -> [x + y + g] |])
-  $(fitSystemQ [|gs|] [| \[g] -> [x + y + g] |])
-  where
-    gs = [1]
-    x = 1
-    y = 2
+-- testCapture =
+-- --   fitSystemC [1] $(system [| \[g] -> [x + y + g] |])
+--   $(fitSystemQ [|gs|] [| \[g] -> [x + y + g] |])
+--   where
+--     gs = [1]
+--     x = 1
+--     y = 2
+
+fitSystemQ :: Q Exp -> Q Exp -> Q Exp
+fitSystemQ guesses qexpr = do
+    (makeVarList, funcExpr) <- captureFreeVars qexpr
+    [| fitSystemThrow $makeVarList $guesses $funcExpr |]
+
+fitSystemQ1 :: Q Exp -> Q Exp -> Q Exp
+fitSystemQ1 guesses qexpr = do
+    (makeVarList, funcExpr) <- captureFreeVars qexpr
+    [| fitSystemThrow1 $makeVarList $guesses $funcExpr |]

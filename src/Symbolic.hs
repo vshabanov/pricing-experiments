@@ -122,6 +122,10 @@ data UnOp
 --     log1mexp x = log1p (negate (exp x))
   | Erf
   | Erfc
+  | Normcdf
+  | Inverf
+  | Inverfc
+  | Invnormcdf
   | Step
   deriving (Eq, Ord, Enum, Bounded, Show, Generic, NFData)
 
@@ -202,6 +206,10 @@ unOp = \ case
   ATanh  -> atanh
   Erf    -> erf
   Erfc   -> erfc
+  Normcdf -> normcdf
+  Inverf  -> inverf
+  Inverfc -> inverfc
+  Invnormcdf -> invnormcdf
   Step   -> step
 
 diff :: N a => Expr a -> Expr a -> Expr a
@@ -292,6 +300,10 @@ diffVar expr by = S.evalState (d expr) IntMap.empty
       ATanh  -> 1 / (1 - x^2)
       Erf    ->  2 / sqrt pi * exp (-x^2)
       Erfc   -> -2 / sqrt pi * exp (-x^2)
+      Normcdf -> recip (sqrt (2 * pi)) * exp (- x^2 / 2)
+      Inverf  ->  sqrt pi / 2 * exp (inverf x^2)
+      Inverfc -> -sqrt pi / 2 * exp (inverfc x^2)
+      Invnormcdf -> sqrt (2 * pi) * exp (invnormcdf x^2 / 2)
       Step   -> k / (exp (k*x) + exp (-k*x) + 2)
     sec x = 1 / cos x
     sech x = 1 / cosh x
@@ -792,8 +804,14 @@ instance N a => Floating (Expr a) where
 --     log1mexp x = log1p (negate (exp x))
 
 instance N a => Erf (Expr a) where
-  erf  = foldUnOp Erf
-  erfc = foldUnOp Erfc
+  erf     = foldUnOp Erf
+  erfc    = foldUnOp Erfc
+  normcdf = foldUnOp Normcdf
+
+instance N a => InvErf (Expr a) where
+  inverf     = foldUnOp Inverf
+  inverfc    = foldUnOp Inverfc
+  invnormcdf = foldUnOp Invnormcdf
 
 instance N a => StructuralOrd (Expr a) where
   structuralCompare = error "StructuralOrd (Expr a) is not implemented"
@@ -949,6 +967,10 @@ showUnOp = \ case
   ATanh  -> "atanh"
   Erf    -> "erf"
   Erfc   -> "erfc"
+  Normcdf -> "normcdf"
+  Inverf  -> "inverf"
+  Inverfc -> "inverfc"
+  Invnormcdf -> "invnormcdf"
   Step   -> "step"
 
 instance N a => Show (FExpr a) where

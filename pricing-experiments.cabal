@@ -66,6 +66,8 @@ executable Test
     Analytic.Market
     Analytic.Pure
     Bump
+    Bump.Market
+    Bump.Pure
     FreeVars
     Gnuplot
     Market

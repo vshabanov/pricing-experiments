@@ -21,15 +21,14 @@ where we differentiate both branches.
 We can then safely use SABR
 ** local vol at t=0?
 * refactorings
-** move solving and smile fitting to separate modules
+** cleanup and move smile fitting to VolSurface
 ** make market indepenent from the input type
 * Implied vol smile calibration
-** Better interpolation
-RR interpolation is nonsence. Calibrate tenor smiles, then interpolate
-standartized ATM, P25, C25 vols and solve smile for these vols and
-corresponding strikes
-** Add BF10/RR10?
-** Market conventions?
+** Market conventions
+partially ready, need to specify conventions in the vol table instead
+of hardcoding them
+** BF10/RR10?
+** Business day model?
 * Fitting of curves and AD?
 does IFT works when we have 10 points but only 2-3 model parameters
 or when error is >> 0
@@ -59,7 +58,7 @@ Andersen scheme,
 Quadradic Exponential scheme (Uwe says it prevents process from
 jumping below zero,
 step size is at least one step a week,
-for barriers PDE is still a method of choice,
+for barriers, PDE is still a method of choice,
 for pegged currencies abandon SLV/MLV, and use local-vol with jumps
 (Travis Fisher presented it on math finance conference, can't find it)
 )

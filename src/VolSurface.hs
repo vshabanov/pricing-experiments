@@ -11,10 +11,24 @@ import Number
 data VolSurface a
   = VolSurface_
     { volSurfaceMarks :: [VolTableRow Tenor a]
-    , volSurfaceSmiles :: [SmileFun a] -- ^ fitted smiles for marks
+    , volSurfaceSmiles :: [FittedSmile a] -- ^ fitted smiles for marks
     , volSurfaceSmileAt :: Memo a (Smile a) -- ^ smile at time t
     }
   deriving Show
+
+defaultDeltaConv = ForwardPips
+defaultAtmConv = ATMDeltaNeutral defaultDeltaConv
+
+data FittedSmile a
+  = FittedSmile
+    { fsSmileFun :: SmileFun a
+      -- in theory, we can do some solving to get ATM and xD strikes and vols,
+      -- but let's just cache them
+    , fsATMkσ  :: (a, a) -- ^ in ATMDeltaNeutral defaultDeltaConv
+    , fs25dpkσ :: (a, a)
+    , fs25dckσ :: (a, a)
+    }
+  deriving (Show, Functor, Foldable, Traversable)
 
 data Smile a
   = Smile_

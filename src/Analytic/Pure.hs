@@ -1,4 +1,4 @@
-{-# LANGUAGE NoFieldSelectors, DuplicateRecordFields #-}
+{-# LANGUAGE NoFieldSelectors, DuplicateRecordFields, OrPatterns, TemplateHaskell #-}
 -- | Pure analytic pricers, no market dependencies
 module Analytic.Pure where
 
@@ -8,20 +8,28 @@ import Text.Printf
 
 import Number
 import StructuralComparison
+import NLFitting
 
 data Greek
   = PV
   | FV
   | RhoFor
   | RhoDom
-  | Delta
+  | Delta DeltaConvention
   | DualDelta -- ^ dv/dk
-  | PipsForwardDelta
   | Gamma
   | Vega
   | Vanna
   | Theta
-  deriving Show
+  deriving (Show, Eq)
+
+data DeltaConvention
+  = SpotPips       -- ^ default BS delta
+  | SpotPercent    -- ^ premium-adjusted delta
+  | ForwardPips
+  | ForwardPercent -- ^ premium-adjusted forward delta
+  | Simple
+  deriving (Show, Eq)
 
 data OptionDirection
   = Call
@@ -101,8 +109,10 @@ data FBS a
 -- | Forward greeks that do not requre separate foreign and domestic rates
 fbs :: Erf a => Greek -> FBS a -> a
 fbs greek FBS{k,d,t,f,σ} = case greek of
-  FV -> b
-  PipsForwardDelta -> b
+  FV
+  Delta ForwardPips
+  Delta ForwardPercent
+  Delta Simple -> b
   where
     b = bs greek BS{k,d,t,s=f,σ,rf=0,rd=0}
 
@@ -117,12 +127,18 @@ bs greek BS{k,d,t=τ,s=x,σ,rf,rd} = case greek of
     φ * k * τ * exp (-rd*τ) * nc (φ*dm)
   RhoFor ->
     -φ * x * τ * exp (-rf*τ) * nc (φ*dp)
-  Delta -> -- pips spot delta
+  Delta SpotPips ->
     φ * exp (-rf*τ) * nc (φ*dp)
+  Delta SpotPercent ->
+    φ * exp (-rd*τ) * k/x * nc (φ*dm)
+  Delta ForwardPips ->
+    φ * nc (φ*dp)
+  Delta ForwardPercent ->
+    φ * k/f * nc (φ*dm)
+  Delta Simple ->
+    φ * nc (φ*d_)
   DualDelta ->
     -φ * exp (-rd*τ) * nc (φ*dm)
-  PipsForwardDelta ->
-    φ * nc (φ*dp)
   Gamma ->
     exp (-rf*τ) * n dp / (x*σ*sqrt τ)
   Vega ->
@@ -137,6 +153,7 @@ bs greek BS{k,d,t=τ,s=x,σ,rf,rd} = case greek of
     f = x * exp ((rd-rf)*τ)
     dp = (log (f/k) + σ^2/2*τ) / (σ*sqrt τ)
     dm = (log (f/k) - σ^2/2*τ) / (σ*sqrt τ)
+    d_ =  log (f/k) / (σ*sqrt τ)
 
 -- | Vanilla (flat vol) digital (dual delta), ignores smile effect.
 bsDigital :: Erf a => Greek -> BS a -> a
@@ -191,9 +208,75 @@ n = normdf
 
 normdf t = exp (- t^2/2) / sqrt (2*pi)
 
+-- | 'strikeFromDelta' input
+data DeltaBS a
+  = DeltaBS
+    { delta :: a -- ^ delta
+    , d  :: OptionDirection
+    , t  :: a -- ^ maturity in years
+    , s  :: a -- ^ spot
+    , σ  :: a -- ^ implied volatility
+    , rf :: a -- ^ foreign rate
+    , rd :: a -- ^ domestic rate
+    }
+  deriving (Show, Functor, Foldable, Traversable)
+
+strikeFromDelta :: N a => DeltaConvention -> DeltaBS a -> a
+strikeFromDelta deltaConv dbs@DeltaBS{d,delta,t=τ,s=x,σ,rf,rd} = case deltaConv of
+  SpotPips ->
+    f * exp (-φ * invnormcdf (φ * exp (rf*τ) * delta) * σ*sqrt τ + σ^2/2*τ)
+  ForwardPips ->
+    f * exp (-φ * invnormcdf (φ * delta) * σ*sqrt τ + σ^2/2*τ)
+  SpotPercent -> fit SpotPips
+  ForwardPercent -> fit ForwardPips
+  Simple ->
+    f * exp (-φ * invnormcdf (φ * delta) * σ*sqrt τ)
+  where
+    φ = directionφ d
+    f = x * exp ((rd-rf)*τ)
+    -- premium-adjusted forward delta is not a monotone function.
+    -- It has no closed form solution and has 2 possible results.
+    -- TODO: do a proper Brent's root search within [kmin..kmax]
+    --       as suggested in "FX Volatility Smile Contruction" by Wystup
+    --       The simple approach below might find the wrong 2nd strike
+    fit guessConv =
+      $(fitSystemQ1 [| strikeFromDelta guessConv dbs |] [| \ k ->
+        bs (Delta $ id deltaConv) BS{k,d=id d,t=τ,s=x,rf,rd,σ} - delta |])
+
+data ATMConvention
+  = ATMSpot
+  | ATMForward
+  | ATMDeltaNeutral DeltaConvention
+  deriving (Show, Eq)
+
+-- | 'atmStrike' input
+data ATMBS a
+  = ATMBS
+    { t  :: a -- ^ maturity in years
+    , s  :: a -- ^ spot
+    , σ  :: a -- ^ implied volatility
+    , rf :: a -- ^ foreign rate
+    , rd :: a -- ^ domestic rate
+    }
+  deriving (Show, Functor, Foldable, Traversable)
+
+atmStrike :: N a => ATMConvention -> ATMBS a -> a
+atmStrike atmConv ATMBS{t=τ,s=x,σ,rf,rd} = case atmConv of
+  ATMSpot -> x
+  ATMForward -> f
+  ATMDeltaNeutral (SpotPips; ForwardPips) ->
+    f * exp (σ^2 * τ / 2)
+  ATMDeltaNeutral (SpotPercent; ForwardPercent) ->
+    f * exp (- σ^2 * τ / 2)
+  ATMDeltaNeutral Simple -> f
+  where
+    f = x * exp ((rd-rf)*τ)
+
 ------------------------------------------------------------------------------
 -- Smiles
 
+-- TODO: worth to make it more generic: ATM and a list of BF/RR for deltas
+--       pure ATM is a flat smile, one BF/RR -- 3 point, two BF/RRs -- 5 points
 data VolTableRow t a
   = VolTableRow
     { t :: t
@@ -230,7 +313,7 @@ data SmileFun a
     , c1 :: a
     , c2 :: a
     }
-  deriving (Show, Functor)
+  deriving (Show, Functor, Foldable, Traversable)
 
 smileVol :: Erf a => SmileFun a -> a -> a
 smileVol s k = case s of

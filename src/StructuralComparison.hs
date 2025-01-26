@@ -19,7 +19,7 @@ class StructuralEq a => StructuralOrd a where
 -- | Wrapper to make 'Eq' and 'Ord' instances use 'StructuralEq' and 'StructuralOrd'.
 newtype SCmp a = SCmp { unSCmp :: a }
   deriving
-    (Show, Num, Fractional, Floating, Erf, NFData
+    (Show, Num, Fractional, Floating, Erf, InvErf, NFData
     ,StructuralEq, StructuralOrd)
 
 instance StructuralEq a => Eq (SCmp a) where

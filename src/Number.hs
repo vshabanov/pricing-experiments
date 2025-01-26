@@ -22,7 +22,7 @@ instance NFData (R.Reverse s a) where
 deriving instance N a => N (SCmp a)
 
 -- | extended Num functions
-class (NFData a, Show a, Erf a, Ord a, StructuralOrd a) => N a where
+class (NFData a, Show a, Erf a, InvErf a, Ord a, StructuralOrd a) => N a where
   exprType :: a -> String
 
   step :: a -> a
