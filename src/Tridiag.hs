@@ -109,21 +109,27 @@ err x = error $ mconcat x
 
 solveTridiagTDMA :: (Fractional a, Ord a, Show a) => Tridiag a -> [a] -> [a]
 solveTridiagTDMA t@(Tridiag _ l d u)
-  | not (diagonallyDominant t)
-  = err ["solveTridiagTDMA: matrix is not diagonally dominant"]
+  | Just e <- nonDiagonallyDominant t
+  = err ["solveTridiagTDMA: matrix is not diagonally dominant, " <> e]
     -- can produce wildly different results from solveTridiagLAGeneric
     -- for non-diagonally dominant matrices
   | otherwise
   = tdmaSolver ([0] <> elems l) (elems d) (elems u <> [0])
 
 -- https://en.wikipedia.org/wiki/Diagonally_dominant_matrix
-diagonallyDominant (Tridiag s l d u)
-  | s <= 1 = True
-  | otherwise = and $
-    [abs (d!0) >= abs (u!0)
-    ,abs (d!(s-1)) >= abs (l!(s-1))]
-    <>
-    [abs (d!i) >= abs (u!i) && abs (d!i) >= abs (l!i) | i <- [1..s-2]]
+nonDiagonallyDominant (Tridiag s _l _d _u)
+  | s <= 1 = Nothing
+  | otherwise =
+      check d u 0
+    $ check d l (s-1)
+    $ foldr (\ i n -> check d u i $ check d l i n) Nothing [1..s-2]
+  where
+    l = (_l, "l"); d = (_d, "d"); u = (_u, "u")
+    check (a,na) (b,nb) i next
+      | not $ abs (a!i) >= abs (b!i) -- do not use <, to check for NaNs as well
+      = Just $ printf "abs (%s!%d) < abs (%s!%d); abs (%s) < abs (%s)"
+        na i nb i (show $ a!i) (show $ b!i)
+      | otherwise = next
 
 solveTridiagLATridiag (Tridiag _ l d u) vec =
   LA.toList $ head $ LA.toColumns

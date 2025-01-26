@@ -356,9 +356,29 @@ smile (sa, sb, interp) rates@Rates{..} t =
     ds d delta σ = strikeFromDelta defaultDeltaConv DeltaBS{d,delta,t,s,σ,rf,rd}
 
     localVol k =
+--       trace (unlines
+--       [ printf "%-7s %f" n (toD $ eval (const 1) v)
+--       | (n::String,v) <-
+--         [("dp"    , dp)
+--         ,("σ"     , σ)
+--         ,("dσdt"  , dσdt)
+--         ,("dσdk"  , dσdk)
+--         ,("d²σdk²", d²σdk²)
+--         ]]) $
 --  σ(K,T) = sqrt (2*(∂C/∂T + (rd-rf) K ∂C/∂K + rf C)/(K² ∂²C/∂K²))
-      sqrt (2*(diff c t + (rd-rf)*k*dcdk + rf*c)/(k^2 * d²cdk²))
+--       sqrt (2*(diff c t + (rd-rf)*k*dcdk + rf*c)/(k^2 * d²cdk²))
+      -- the longer version of the above from [Andersen98] that:
+      --  * doesn't have huge localVol or NaNs when t is close to 0
+      --  * about 2x faster
+      sqrt $ (2*dσdt + σ/t + 2*k*(rd-rf)*dσdk)
+      / (k^2 * (d²σdk² - dp*sqrt t*dσdk^2 + (1/(k*sqrt t) + dp*dσdk)^2/σ))
       where
+        dp = (log (s/k) + (rd-rf + σ^2/2)*t) / (σ*sqrt t)
+        σ = impliedVol k
+        dσdt = diff σ t
+        dσdk = diff σ k
+        d²σdk² = diff dσdk k
+
         dcdk = diff c k
         d²cdk² = diff dcdk k
         c = bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t}
@@ -727,16 +747,16 @@ plot mkt = plotGraphs
 --   $ map smileVariance $ drop 5 $ volSurfaceSmiles $ get VolSurface mkt
 --   $ map variance [0.51,0.511..0.55]
 --   $ map (p . volSmileCDF mkt) [0.1,0.15..1]
---   [
---    p $ volSmileCDF mkt t
--- --   ,volSmileCDF_LocalVol mkt t
--- --   ,p (impliedVol mkt 0)
--- --   ,p (impliedVol mkt 0.0001)
--- --   ,p (impliedVol mkt 0.001)
--- --   ,p (impliedVol mkt 0.01)
---   ,p (impliedVol mkt t)
--- --   ,pointsStyle $ smileFittingPoints $ get Smile mkt t
---   ]
+  [
+   p $ volSmileCDF mkt t
+--   ,volSmileCDF_LocalVol mkt t
+--   ,p (impliedVol mkt 0)
+--   ,p (impliedVol mkt 0.0001)
+--   ,p (impliedVol mkt 0.001)
+--   ,p (impliedVol mkt 0.01)
+  ,p (impliedVol mkt t)
+--   ,pointsStyle $ smileFittingPoints $ get Smile mkt t
+  ]
 --   [defaultStyle $ functionPlot 0.01 1 $ \ t -> impliedVol mkt t 1.3 ^ 2 * t]
   where
     smileVariance (fsSmileFun -> s) =
@@ -745,7 +765,7 @@ plot mkt = plotGraphs
       v1 x
 --       signum $ v2 x - v1 x
     var t = (\ v -> v^2 * t) . impliedVol mkt t
-    t = 1
+    t = 0.0001
     p = defaultStyle . functionPlot
 --         1.3 1.5
         0.5 (oStrike o + 1)
@@ -844,7 +864,7 @@ fem' nx nt market =
     u0 = [getPv market (const $ exp $ iToLogSpot x) / exp (-rd*τ) | x <- [0..nx+1]]
 
     -- FEM
---     -- Flat vol
+    -- Flat vol
 --     α _ _ = σ^2/2
 --     β _ _ = σ^2/2-rd+rf
     -- Local vol
@@ -941,17 +961,17 @@ main = do
 -- --  printf "Analytic PV = %f, MC PV = %f, %s\n" a m (show $ pct a m)
 -- --  plot mkt
 -- --  print $ fem mkt
-  let (adDelta:_) = greeksAD
-      femBumpDelta = dvdx' (\ m () -> fem m) mkt () Spot 0.0001
-  printf "femBumpDelta = %f, adDelta = %f, %s\n" femBumpDelta adDelta (show $ pct femBumpDelta adDelta)
+--   let (adDelta:_) = greeksAD
+--       femBumpDelta = dvdx' (\ m () -> fem m) mkt () Spot 0.0001
+--   printf "femBumpDelta = %f, adDelta = %f, %s\n" femBumpDelta adDelta (show $ pct femBumpDelta adDelta)
   let analyticPV = p mkt PV
-      femPV = pv
+      femPV = fem' 100 50 mkt :: Double
   printf "femPV = %f, analyticPV = %f, %s\n" femPV analyticPV (show $ pct femPV analyticPV)
-  print greeks
-  print $ compareToAnalytic greeks
-  print greeksAD
-  print $ compareToAnalytic greeksAD
-  print $ zipWith pct greeks greeksAD
+--   print greeks
+--   print $ compareToAnalytic greeks
+--   print greeksAD
+--   print $ compareToAnalytic greeksAD
+--   print $ zipWith pct greeks greeksAD
 --   where
 --     a = p mkt PV
 --     m = monteCarlo mkt
