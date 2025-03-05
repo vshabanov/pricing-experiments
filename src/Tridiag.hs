@@ -23,6 +23,7 @@ import qualified Numeric.LinearAlgebra as LA
 import Test.QuickCheck
 import Text.Printf
 import Traversables
+import Number
 
 infixl 6 .+, .- -- same as (+)
 infixl 7 .*, #> -- same as (*)
@@ -107,14 +108,14 @@ data Tridiag a
 
 err x = error $ mconcat x
 
-solveTridiagTDMA :: (Fractional a, Ord a, Show a) => Tridiag a -> [a] -> [a]
-solveTridiagTDMA t@(Tridiag _ l d u)
+solveTridiagTDMA :: N a => Tridiag a -> [a] -> [a]
+solveTridiagTDMA t@(Tridiag s l d u)
   | Just e <- nonDiagonallyDominant t
   = err ["solveTridiagTDMA: matrix is not diagonally dominant, " <> e]
     -- can produce wildly different results from solveTridiagLAGeneric
     -- for non-diagonally dominant matrices
-  | otherwise
-  = tdmaSolver ([0] <> elems l) (elems d) (elems u <> [0])
+  | s == 0 = const []
+  | otherwise = tdmaSolver ([0] <> elems l) (elems d) (elems u <> [0])
 
 -- https://en.wikipedia.org/wiki/Diagonally_dominant_matrix
 nonDiagonallyDominant (Tridiag s _l _d _u)
@@ -127,8 +128,8 @@ nonDiagonallyDominant (Tridiag s _l _d _u)
     l = (_l, "l"); d = (_d, "d"); u = (_u, "u")
     check (a,na) (b,nb) i next
       | not $ abs (a!i) >= abs (b!i) -- do not use <, to check for NaNs as well
-      = Just $ printf "abs (%s!%d) < abs (%s!%d); abs (%s) < abs (%s)"
-        na i nb i (show $ a!i) (show $ b!i)
+      = Just $ printf "abs (%s!%d) < abs (%s!%d); abs (%f) < abs (%f)"
+        na i nb i (toD $ a!i) (toD $ b!i)
       | otherwise = next
 
 solveTridiagLATridiag (Tridiag _ l d u) vec =

@@ -13,7 +13,6 @@ module NLFitting
 import Data.Foldable
 import Data.Reflection (Reifies)
 import qualified Numeric.LinearAlgebra as LA
-import qualified Control.Monad.State.Strict as S
 import qualified Numeric.AD.Mode.Reverse.Double as RD
 import qualified Numeric.AD.Internal.Reverse.Double as RD
 import Text.Printf
@@ -23,7 +22,6 @@ import Numeric.GSL.Fitting
 import Debug.Trace
 
 import qualified Symbolic.Matrix as S
-import Solving
 import Symbolic
 import Bump.Pure
 import Number
@@ -77,11 +75,6 @@ fitTest = d2xda2Bump `seq` (Just d2xda2Bump,
 --       попробовать с "системой" из одного уравнения x^2 - 4
 --       первая производная 2x = 4
 --       вторая производная 2
-
--- | Replace elements of 'Traversable'
--- @replace t (toList t) = t@
-replace :: Traversable t => [a] -> t b -> t a
-replace l t = S.evalState (mapM (const $ S.state (\ (x:xs) -> (x,xs))) t) l
 
 {-# INLINE fitSystemThrow1 #-}
 fitSystemThrow1
@@ -144,7 +137,7 @@ fitSystem
      -- ^ n inputs -> m guesses -> m errors
   -> Either String [a] -- ^ results with derivatives to inputs
 fitSystem inputs guesses system0
-  | err > 1e-9 = -- Sum of squared residuals (sum . map (^2))
+  | err > 1e-9 || nan =
     -- if there's a big error, there's a big chance that
     --  * LA.inv will fail with a singular matrix
     --  * LA.inv will not fail, but derivatives will be incorrect
@@ -175,8 +168,11 @@ fitSystem inputs guesses system0
       DLAny  -> resultsWith2ndDerivatives
 --       trace (show (jr results, "inv", LA.inv (jr results), guesses, inputsD, results, ji inputsD, LA.dispf 3 jResultsInputs)) $
   where
+    nan = any (isNaN . fst) $ jrMemo results
     (proxy:_) = toList inputs
-    (nIterations:err:lastGuesses) = LA.toList $ last $ LA.toRows path
+    (nIterations
+     :err -- Sum of squared residuals (sum . map (^2))
+     :lastGuesses) = LA.toList $ last $ LA.toRows path
     -- numerically computed 1st order derivatives,
     -- fast, but AD won't work if the result is symbolically differentiated
     -- (as there are no 2nd-order derivatives)
@@ -271,7 +267,7 @@ fitSystem inputs guesses system0
     matrix m n = (LA.><) m n . concat -- == LA.fromLists
     tagged prefix is =
       zipWith (\ n v -> tag (prefix <> show n) $ lift v) [0..] is
-
+{-
 test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
        , dgda `pct` fdgda, dgdb `pct` fdgdb
        , d2gda2Bump
@@ -290,7 +286,7 @@ test = (x :: Double, dgda `pct` dgdaBump, dgdb `pct` dgdbBump
     n a b = newton (\ as x -> f as x) [a, b] 0.5
     nx a b = let Right (x,_,_) = n a b in x
     f [a,b] x = a * cos x - b * x^3
-
+-}
 -- testCapture =
 -- --   fitSystemC [1] $(system [| \[g] -> [x + y + g] |])
 --   $(fitSystemQ [|gs|] [| \[g] -> [x + y + g] |])

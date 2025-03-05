@@ -56,6 +56,9 @@ class (NFData a, Show a, Erf a, InvErf a, Ord a, StructuralOrd a) => N a where
   isOne :: a -> Bool
 --   isOne = structuralEq 1
 
+  -- | @if_ LT a b then else@
+  if_ :: Ordering -> a -> a -> a -> a -> a
+
 data DLevel
   = DLNone  -- ^ can't be differentiated, 'explicitD' is no-op
   | DL1st   -- ^ can have 1st order derivative, 'explicitD' only honors jacobian
@@ -82,6 +85,9 @@ instance N Double where
   dLevel _ = DLNone
   isZero = (== 0)
   isOne  = (== 1)
+  if_ o a b t e
+    | compare a b == o = t
+    | otherwise        = e
 instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
   exprType _ = "R.Reverse s (" <> exprType (undefined :: a) <> ")"
   step = J.lift1 step
@@ -111,6 +117,9 @@ instance (Reifies s R.Tape, N a) => N (R.Reverse s a) where
     R.Zero -> False
     R.Lift x -> isOne x
     R.Reverse{} -> False
+  if_ o a b t e
+    | compare (R.primal a) (R.primal b) == o = t
+    | otherwise = e
 
 instance NFData (RD.ReverseDouble s) where
   rnf !a = ()
@@ -139,3 +148,6 @@ instance (Reifies s RD.Tape) => N (RD.ReverseDouble s) where
     RD.Zero -> False
     RD.Lift x -> isOne x
     RD.ReverseDouble{} -> False
+  if_ o a b t e
+    | compare (RD.primal a) (RD.primal b) == o = t
+    | otherwise = e

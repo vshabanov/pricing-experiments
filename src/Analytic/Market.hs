@@ -1,6 +1,7 @@
 -- | Market-based analytic pricers
 module Analytic.Market where
 
+import Control.DeepSeq
 import Data.Number.Erf
 import Data.List
 import Number
@@ -9,12 +10,15 @@ import Analytic.Pure
 import Debug.Trace
 import Text.Printf
 
+import StructuralComparison
+
 data Option a
   = Option
     { oStrike :: a
     , oMaturityInYears :: a
     , oDirection :: OptionDirection
     }
+  deriving Show
 data OneTouch a
   = OneTouch
     { otBarrier :: a
@@ -22,43 +26,45 @@ data OneTouch a
     , otPayOn :: PayOn
     , otMaturityInYears :: a
     }
+  deriving Show
 data Forward a
   = Forward
     { fStrike :: Strike a
     , fMaturityInYears :: MaturityInYears a
     }
+  deriving Show
 newtype Strike a = Strike { strike :: a }
-  deriving (Num, Fractional, Floating, Erf)
+  deriving (Num, Fractional, Floating, Erf, Show, NFData, InvErf, Ord, Eq, StructuralOrd, StructuralEq, N)
 newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
-  deriving (Num, Fractional, Floating, Erf)
+  deriving (Num, Fractional, Floating, Erf, Show, NFData, InvErf, Ord, Eq, StructuralOrd, StructuralEq, N)
 
 rates :: Market a -> Rates a
 rates m = Rates{s = get Spot m, rf = get RateFor m, rd = get RateDom m}
 
-bsDigitalPricer :: Erf a => Option a -> Market a -> Greek -> a
+bsDigitalPricer :: N a => Option a -> Market a -> Greek -> a
 bsDigitalPricer o market greek =
   bsDigital greek $ marketBS o market
 
-bsDigitalUndiscPricer :: Erf a => Option a -> Market a -> Greek -> a
+bsDigitalUndiscPricer :: N a => Option a -> Market a -> Greek -> a
 bsDigitalUndiscPricer o market greek =
   bsDigitalUndisc greek $ marketBS o market
 
-digitalPricer :: Erf a => Option a -> Market a -> Greek -> a
+digitalPricer :: N a => Option a -> Market a -> Greek -> a
 digitalPricer o market greek =
   uncurry (digital greek) $ marketBS_impliedVol'k o market
 
-digitalUndiscPricer :: Erf a => Option a -> Market a -> Greek -> a
+digitalUndiscPricer :: N a => Option a -> Market a -> Greek -> a
 digitalUndiscPricer o market greek =
   uncurry (digitalUndisc greek) $ marketBS_impliedVol'k o market
 
-blackScholesPricer :: Erf a => Option a -> Market a -> Greek -> a
+blackScholesPricer :: N a => Option a -> Market a -> Greek -> a
 blackScholesPricer o market greek = bs greek $ marketBS o market
 
-marketBS_impliedVol'k :: Erf a => Option a -> Market a -> (BS a, a)
+marketBS_impliedVol'k :: N a => Option a -> Market a -> (BS a, a)
 marketBS_impliedVol'k o market = (b, impliedVol'k market t k)
   where b@BS{t,k} = marketBS o market
 
-marketBS :: Erf a => Option a -> Market a -> BS a
+marketBS :: N a => Option a -> Market a -> BS a
 marketBS o market = BS{..}
   where
     k = oStrike o
@@ -70,6 +76,14 @@ marketBS o market = BS{..}
     rd = m RateDom
     m i = get i market
 
+marketRatesT :: Erf a => a -> Market a -> RatesT a
+marketRatesT t market = RatesT{..}
+  where
+    s = m Spot
+    rf = m RateFor
+    rd = m RateDom
+    m i = get i market
+
 pay1Pricer :: Erf a => OneTouch a -> Market a -> Greek -> a
 pay1Pricer ot market PV = exp (-rd*τ)
   where
@@ -77,11 +91,11 @@ pay1Pricer ot market PV = exp (-rd*τ)
     rd = m RateDom
     m i = get i market
 
-noTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
+noTouchPricer :: N a => OneTouch a -> Market a -> Greek -> a
 noTouchPricer ot market what =
   pay1Pricer ot market what - oneTouchPricer ot market what
 
-oneTouchPricer :: Erf a => OneTouch a -> Market a -> Greek -> a
+oneTouchPricer :: N a => OneTouch a -> Market a -> Greek -> a
 oneTouchPricer ot market PV =
   exp (-ω*rd*τ) *
   (  (b/x)**((θm+𝜗m)/σ) * nc (-η*ep)

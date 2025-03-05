@@ -1,14 +1,22 @@
-{-# LANGUAGE NoFieldSelectors, DuplicateRecordFields, OrPatterns, TemplateHaskell #-}
+{-# LANGUAGE NoFieldSelectors, DuplicateRecordFields, OrPatterns,
+             TemplateHaskell, DerivingStrategies, DeriveAnyClass #-}
 -- | Pure analytic pricers, no market dependencies
 module Analytic.Pure where
 
+import Control.DeepSeq
+import GHC.Generics (Generic)
 import Debug.Trace
 import Data.Number.Erf
 import Text.Printf
+import Data.Ord
+import Data.List
 
 import Number
 import StructuralComparison
 import NLFitting
+import Spline
+import Tenor
+import Traversables
 
 data Greek
   = PV
@@ -81,6 +89,9 @@ data RatesT a
 
 forwardRate :: Floating a => Rates a -> a -> a
 forwardRate Rates{s,rf,rd} t = s * exp ((rd-rf)*t)
+
+forwardRateT :: Floating a => RatesT a -> a
+forwardRateT RatesT{s,rf,rd,t} = forwardRate Rates{s,rf,rd} t
 
 -- | 'bs' arguments
 data BS a
@@ -272,6 +283,47 @@ atmStrike atmConv ATMBS{t=τ,s=x,σ,rf,rd} = case atmConv of
   where
     f = x * exp ((rd-rf)*τ)
 
+data StrikeShortcut a
+  = SSATM
+  | SSDelta a  -- ^ N-delta strike. Smile delta convention will be used
+  | SSStrike a -- ^ direct strike input
+  deriving Show
+
+resolveStrike
+  :: N a
+  => StrikeShortcut a
+  -> OptionDirection
+  -> SmileFun a
+  -> ConventionsTable
+  -> RatesT a
+  -> a
+resolveStrike shortcut dir smile convs rates@RatesT{s} = case shortcut of
+  SSATM ->
+    fitSystemThrow1 (TT smile rates) s $ \ (TT smile RatesT{s,t,rf,rd}) k ->
+      atmStrike (atmConvAt t convs) ATMBS{s,t,rf,rd,σ=smileVol smile k} - k
+  SSDelta delta ->
+    fitSystemThrow1 (T delta (TT smile rates)) s
+                $ \ (T delta (TT smile RatesT{s,t,rf,rd})) k ->
+      bs (Delta (deltaConvAt t convs))
+        BS{k,d=id dir,σ=smileVol smile k,s,rf,rd,t} - delta
+  SSStrike s -> s
+
+type Conventions = (DeltaConvention, ATMConvention)
+data ConventionsTable = ConventionsTable [(Tenor, Conventions)]
+  deriving Show
+
+fixedConventions c = ConventionsTable [(D 0, c)]
+
+deltaConvAt t c = fst $ conventionsAt t c
+atmConvAt t c = snd $ conventionsAt t c
+
+conventionsAt :: N a => a -> ConventionsTable -> Conventions
+conventionsAt t (ConventionsTable xs) =
+  maybe
+    (error $ mconcat
+     ["Can't find conventions for t = ", show (toD t), " in ", show xs])
+    snd (find ((t >=) . tenorToYear . fst) $ sortBy (comparing $ Down . fst) xs)
+
 ------------------------------------------------------------------------------
 -- Smiles
 
@@ -294,12 +346,11 @@ instance (Show t, N a) => Show (VolTableRow t a) where
       (show t) (toD σatm) (toD σrr25) (toD σbf25)
       (toD σrr10) (toD σbf10)
 
-smileFunT = \ case
-  SABR{t} -> t
-  PolynomialInDelta{t} -> t
-
 data SmileFun a
-  = SABR
+  = FlatSmile
+    { σ :: a -- ^ flat volatility
+    }
+  | SABR
     { f0 :: a -- ^ initial forward
     , t  :: a
     , σ0 :: a -- ^ initial volatility
@@ -313,26 +364,48 @@ data SmileFun a
     , c1 :: a
     , c2 :: a
     }
-  deriving (Show, Functor, Foldable, Traversable)
+  | Spline
+    { f :: a -- ^ forward (or ATM?) to make log-moneyness transformation
+    , coefficients :: CubicSpline a
+    }
+  deriving (Show, Functor, Foldable, Traversable, Generic)
+  deriving anyclass NFData
 
-smileVol :: Erf a => SmileFun a -> a -> a
+smileVol :: N a => SmileFun a -> a -> a
 smileVol s k = case s of
+  FlatSmile{σ} -> σ
   SABR{f0,t,σ0,ρ,ν} -> sabr f0 t σ0 ρ ν k
   PolynomialInDelta{f,t,c0,c1,c2} -> polynomialInDelta f t c0 c1 c2 k
+  Spline{f,coefficients} ->
+    fromSplineY $ interpolateCubicSpline coefficients $ toSplineX f k
+
+toSplineX :: Floating a => a -> a -> a
+toSplineX f k = log (k / f)
+
+toSplineY :: Floating a => a -> a
+toSplineY y = y^2
+
+fromSplineY :: Floating a => a -> a
+fromSplineY y = sqrt y
 
 -- | SABR model, Hull p648, Iain p60 (same formula, but no f0=k case)
 -- f0 -- initial forward
 -- σ0 -- initial volatility
 -- ν  -- volatility of volatility
 -- ρ  -- correlation between spot and volatility
-sabr f0 t σ0 ρ ν k
---  | SCmp f0 == SCmp k = σ0*b/f0**(1-β)
-    -- the default formula is undefined when f0=k, this can break AD
-    -- Comparison here doesn't help as we have a differentiated version
-    -- and no longer run this function at all.
-  | otherwise =
---     trace (show (f0,k)) $
-    a * b * ϕ / χ
+sabr f0 t σ0 ρ ν k =
+  if_ LT (abs (f0 - k)) eps
+    -- The default formula is undefined when f0=k.
+    -- The value with f0=k is σ0*b/f0**(1-β)
+    -- but its d/dk=0.
+    -- The approach with approximated allows us to have a derivative in AD setting
+    ((s (k-2*eps) + s (k+2*eps)) / 2)
+    (s k)
+  where
+    eps = 1e-6 -- less than a minimum pip size
+    s = sabrUnchecked f0 t σ0 ρ ν
+
+sabrUnchecked f0 t σ0 ρ ν k = a * b * ϕ / χ
   where
     x = (f0*k)**((1-β)/2)
     y = (1-β)*log(f0/k)
@@ -351,5 +424,5 @@ polynomialInDelta f t c0 c1 c2 k =
   exp $ fun $ log (f / k)
   where
     fun x = c0 + c1*δ x + c2*δ x^2
-    σ0 = exp c0
+    σ0 = exp c0 -- force to be positive
     δ x = normcdf (x / (σ0 * sqrt t))

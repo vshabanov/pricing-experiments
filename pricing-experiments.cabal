@@ -76,10 +76,12 @@ executable Test
     Percent
     Random
     Solving
+    Spline
     StructuralComparison
     Symbolic
     Symbolic.Matrix
     Tenor
+    TestData
     Traversables
     Tridiag
     Unique

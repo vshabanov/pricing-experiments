@@ -22,7 +22,7 @@ module Market
   ( -- * Market and its inputs
     Market
   , Get(..)
-  , impliedVol, localVol, impliedVol'k, localVol's
+  , impliedVol, localVol, impliedVol'k, localVol's, smileAt
     -- TODO: separate the market and inputs
     -- * Building a new market
   , buildMarket, input, node, Recipe, Node
@@ -50,6 +50,7 @@ import GHC.Generics (Generic)
 import Unique
 import Tenor
 import VolSurface
+import Analytic.Pure
 
 -- | @Get n a@ some data from the @Market n@ with type @a@
 data Get n a where
@@ -64,13 +65,14 @@ data Get n a where
   -- nodes
   VolSurface :: Get a (VolSurface a)
 
-smileAt :: Market a -> a -> Smile a
-smileAt mkt = unMemo $ volSurfaceSmileAt $ get VolSurface mkt
+smileAt :: a -> Market a -> Smile a
+smileAt t mkt = (unMemo $ volSurfaceSmileAt $ get VolSurface mkt) t
 
-impliedVol'k mkt = smileImpliedVol'k . smileAt mkt
-impliedVol   mkt = smileImpliedVol   . smileAt mkt
-localVol     mkt = smileLocalVol     . smileAt mkt
-localVol's   mkt = smileLocalVol's   . smileAt mkt
+impliedVol'k mkt = smileImpliedVol'k . flip smileAt mkt
+impliedVol   mkt = smileVol
+                 . smileImpliedVol   . flip smileAt mkt
+localVol     mkt = smileLocalVol     . flip smileAt mkt
+localVol's   mkt = smileLocalVol's   . flip smileAt mkt
 
 deriving instance Eq (Get n a)
 deriving instance Ord (Get n a)

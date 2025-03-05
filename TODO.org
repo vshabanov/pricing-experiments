@@ -1,6 +1,10 @@
 #+STARTUP: indent
 
 * Local-vol, make sure mc/fem match bs with implied vol
+** check NaNs in local vol
+via grid? we can check arbitrages while building the vol surface.
+d2c/dk2 > 0,
+0 < dc/dk < 1
 ** local vol via a grid instead of a symbolic expr
 Should be much faster (no hessians and symbolic matrix inversions,
 much simpler derivatives and smaller AD dependencies/RAM usage).
@@ -15,19 +19,12 @@ FEM calculations better than instantaneous derivative)
     tape elements (comparing to just 24 for impliedVol), so the
     simplification of vol calculation at grid points should give a big
     boost
-
-** extend Expr with @if x ~ y then e1 else e2@
-where we differentiate both branches.
-We can then safely use SABR
 ** local vol at t=0?
 * refactorings
+** remove Ord from N, add Ord (NBase a)
 ** cleanup and move smile fitting to VolSurface
 ** make market indepenent from the input type
 * Implied vol smile calibration
-** Market conventions
-partially ready, need to specify conventions in the vol table instead
-of hardcoding them
-** BF10/RR10?
 ** Business day model?
 * Fitting of curves and AD?
 does IFT works when we have 10 points but only 2-3 model parameters

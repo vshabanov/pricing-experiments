@@ -71,6 +71,9 @@ data Expr a
   | Tag !I !(Maybe a) VarId (Expr a)
     -- | Lifted AD value.
   | Const a
+  | If !I !Ordering (Expr a) (Expr a)
+    (Expr a) -- ^ then branch
+    (Expr a) -- ^ else branch
   | BinOp !I !(Maybe a) !BinOp (Expr a) (Expr a)
   | UnOp !I !(Maybe a) !UnOp (Expr a)
   | ExplicitD !I !(Maybe a)
@@ -78,6 +81,9 @@ data Expr a
     [(Expr a, Int)]      -- ^ jacobian [(∂x/∂var, var)]
     [(Expr a, Int, Int)] -- ^ hessian  [(∂x/(∂var1*∂var2), var1, var2)]
     (Expr a)
+  deriving (Generic, NFData)
+
+data Cmp a = Cmp (Expr a) Ordering (Expr a)
   deriving (Generic, NFData)
 
 var x = withNewId $ \ i -> Var i x
@@ -131,9 +137,10 @@ data UnOp
 
 evalMaybe :: Expr a -> Maybe a
 evalMaybe = \ case
-  Var {} -> Nothing
+  Var{} -> Nothing
   Tag _ m _ _ -> m
   Const a -> Just a
+  If{} -> Nothing
   BinOp _ m _ _ _ -> m
   UnOp _ m _ _ -> m
   ExplicitD _ m _ _ _ _ -> m
@@ -146,6 +153,7 @@ untag expr = S.evalState (go expr) IntMap.empty
       v@Var{} -> pure v
       Tag i _ _ e -> m i $ go e
       c@Const{} -> pure c
+      If i c a b t e -> m i $ liftM4 (if_ c) (go a) (go b) (go t) (go e)
       BinOp i _ op a b -> m i $ liftM2 (foldBinOp op) (go a) (go b)
       UnOp i _ op e -> m i $ foldUnOp op <$> go e
       ExplicitD i _ v j h a -> m i $ mapMExplicitD explicitD go v j h a
@@ -158,6 +166,7 @@ eval subst expr = S.evalState (go expr) IntMap.empty
       Tag i (Just x) _ _ -> pure x
       Tag i _ _ e -> m i $ go e
       Const x -> pure x
+      If i c a b t e -> m i $ liftM4 (if_ c) (go a) (go b) (go t) (go e)
       BinOp i (Just x) _ _ _ -> pure x
       BinOp i _ op a b -> m i $ liftM2 (binOp op) (go a) (go b)
       UnOp i (Just x) _ _ -> pure x
@@ -243,6 +252,7 @@ diffVar expr by = S.evalState (d expr) IntMap.empty
         | otherwise -> -- Tag i vi $
           d e -- is it correct at all? throw error?
       Const _ -> pure 0
+      If i c a b t e -> m i $ liftM2 (if_ c a b) (d t) (d e)
       BinOp i _ op a b -> m i $ binOp op a b
       UnOp i _ op a -> m i $ do
         !a' <- d a
@@ -328,6 +338,7 @@ data Operation a
   = OVar VarId
   | OTag !I -- ^ redirect to another index
   | OConst !a
+  | OIf !Ordering !I !I !I !I
   | OBinOp !BinOp !I !I
   | OUnOp !UnOp !I
   | OExplicitD
@@ -348,6 +359,7 @@ evalOps ops subst = r `deepseq` r!hi
       OVar v -> subst v
       OTag i -> r!i
       OConst x -> x
+      OIf c a b t e -> if_ c (r!a) (r!b) (r!t) (r!e)
       OBinOp op a b -> binOp op (r!a) (r!b)
       OUnOp op a -> unOp op (r!a)
       OExplicitD v j h a ->
@@ -369,6 +381,7 @@ compileOps expr = force $ listArray (0, nOps-1) $ reverse ops
       Tag i (Just x) _ _ -> iconst i x
       Tag i _ _ e -> o i $ OTag <$> go e
       Const x -> lit x
+      If i c a b t e -> o i $ liftM4 (OIf c) (go a) (go b) (go t) (go e)
       BinOp i (Just x) _ _ _ -> iconst i x
       BinOp i _ op a b -> o i $ liftM2 (OBinOp op) (go a) (go b)
       UnOp i (Just x) _ _ -> iconst i x
@@ -455,6 +468,12 @@ cse' e = go e
         get (CTag v ie) (tag v se)
       c@(Const x) ->
         get (CConst $ SCmp x) c
+      If i c a b t e -> m i $ do
+        IE ia sa <- go a
+        IE ib sb <- go b
+        IE it st <- go t
+        IE ie se <- go e
+        get (CIf c ia ib it ie) (if_ c sa sb st se)
       BinOp i _ op a b -> m i $ do
         IE ia sa <- go a
         IE ib sb <- go b
@@ -497,6 +516,7 @@ data CExpr a
   = CVar VarId
   | CTag VarId !I
   | CConst (SCmp a)
+  | CIf Ordering !I !I !I !I
   | CBinOp BinOp !I !I
   | CUnOp UnOp !I
   | CExplicitD [I] [(I, Int)] [(I, Int, Int)] !I
@@ -536,6 +556,7 @@ data FExpr a
   = FVar VarId
   | FTag VarId (FExpr a)
   | FUnOp UnOp (FExpr a)
+  | FIf Ordering (FExpr a) (FExpr a) (FExpr a) (FExpr a)
   | FExpt (FExpr a) (FExpr a)
   | FSum (SCmp a) (Map (FExpr a) (SCmp a))
     -- ^ c0 + expr1*c1 + expr2*c2 ...
@@ -571,7 +592,8 @@ fsimp = fixedPoint $ \ case
   FUnOp op e -> FUnOp op (fsimp e)
   e@FVar{} -> e
   FTag i e -> FTag i (fsimp e)
-  e@FExplicitD{} -> e
+  e@FExplicitD{} -> e -- TODO: recurse
+  e@FIf{} -> e -- TODO: recurse
   where
     recurse
       :: (StructuralOrd a, N a, StructuralEq b, Num b)
@@ -628,6 +650,7 @@ fexpand = \ case
   FVar i -> var i
   FTag i x -> tag i (e x)
   FExplicitD v j h x -> mapExplicitD explicitD e v j h x
+  FIf c a b t e_ -> if_ c (e a) (e b) (e t) (e e_)
   where
     -- put negative constants last to have more a-b and a/b
     -- instead of -1*b+a and 1/b*a
@@ -664,6 +687,7 @@ factor = \ case
   Var _ i -> FVar i
   Tag _ _ i e -> FTag i $ factor e
   Const c -> FSum (SCmp c) Map.empty
+  If _ c a b t e -> FIf c (factor a) (factor b) (factor t) (factor e)
   BinOp _ _ op a b ->
     let m ca cb = Map.fromListWith (+) [(factor a, ca), (factor b, cb)]
     in
@@ -700,6 +724,9 @@ instance N a => StructuralEq (Expr a) where
     (Var ia a, Var ib b) -> ia == ib || a == b
     (Tag ia _ ta ea, Tag ib _ tb eb) -> ia == ib || ta == tb && structuralEq ea eb
     (Const a, Const b) -> structuralEq a b -- but NaN /= NaN
+    (If ia ca aa ba ta ea, If ib cb ab bb tb eb) ->
+      ia == ib || ca == cb && structuralEq aa ab && structuralEq ba bb
+      && structuralEq ta tb && structuralEq ea eb
     (UnOp ia _ oa a, UnOp ib _ ob b) -> ia == ib ||
       oa == ob && structuralEq a b
     (BinOp ia _ oa a1 a2, BinOp ib _ ob b1 b2) -> ia == ib ||
@@ -718,6 +745,7 @@ instance N a => StructuralEq (Expr a) where
     (BinOp{}, _) -> False
     (UnOp{}, _) -> False
     (ExplicitD{}, _) -> False
+    (If{}, _) -> False
 
 instance N a => IsString (Expr a) where
   fromString = parseExpr
@@ -835,6 +863,11 @@ instance N a => N (Expr a) where
   isOne = \ case
     Const x -> isOne x
     _ -> False
+  if_ c ea eb t e = case (evalMaybe ea, evalMaybe eb) of
+    (Just a, Just b)
+      | compare a b == c -> t
+      | otherwise -> e
+    _ -> withNewId $ \ i -> If i c ea eb t e
 
 unsafeEval debugName =
   eval (\ v -> error $ "toD: undefined variable " <> show v)
@@ -866,6 +899,12 @@ showExprWithSharing expr
       Var _ n -> pure n
       Tag i _ n e -> add i ("_" <> n) $ go e
       Const a -> pure $ show a
+      If i c a b t e -> add i "" $ do
+        sa <- go a
+        sb <- go b
+        st <- go t
+        se <- go e
+        pure $ unwords ["if", show c, sa, sb, st, se]
       BinOp i _ op l r -> add i "" $ do
         sl <- go l
         sr <- go r
@@ -913,8 +952,10 @@ showExpr m p@(pNegate, pa, pp) = \ case
     let f@(_, _, p) = (op == Negate, P.AssocNone, 10)
     in
       parensIf (p <= pp || (op == Negate && pp > 0)) [showUnOp op, showExpr m f a]
-  ExplicitD i _ v j h a ->
+  ExplicitD _ _ v j h a ->
     unwords ["ExplicitD", show v, show j, show h, show a]
+  If _ c a b t e ->
+    unwords ["if", show c, show a, show b, show t, show e]
   where
     argParens = m == SEM_Maxima && pp == 10 && not pNegate
 
@@ -935,6 +976,7 @@ debugShowExpr = \ case
   BinOp i m op a b -> unwords ["BinOp", show i, sm m, show op, go a, go b]
   UnOp i m op a -> unwords ["UnOp", show i, sm m, show op, go a]
   ExplicitD i m v j h a -> unwords ["ExplicitD", show i, sm m, "TODO ExplicitD"] -- show op, go a]
+  If i c a b t e -> unwords ["If", show i, show c, go a, go b, go t, go e]
   where
     go x = mconcat ["(", debugShowExpr x, ")"]
     sm x = showsPrec 10 x ""
@@ -987,6 +1029,7 @@ showFExpr root = \ case
   FUnOp op a -> parens "(" ")" $ unwords [show op, showFExpr False a]
   FExpt a b -> showFExpr False a <> "**" <> showFExpr False b
   FExplicitD{} -> "TODO FExplicitD"
+  FIf{} -> "TODO FIf"
   where
     showC (SCmp x) = show x
     showS = map $ \ case
@@ -1138,7 +1181,7 @@ numDiff' bump e = (eb bump - eb (-bump)) / (2*bump)
     eb b = eval (\ case "x" -> x+b; v -> fromJust $ lookup v testVars) e
     x = testEval "x"
 
-prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-1 n s
+prop_diff (TestDiffExpr e) = counterexample debug $ eq_eps 1e-4 n s
   where
     debug = unlines
       ["Debug Expr:"

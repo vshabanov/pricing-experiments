@@ -1,11 +1,14 @@
 module Solving
   ( newton
-  , solve
+  , brent
   )
   where
 
 import qualified Numeric.AD.Mode.Reverse as R
 import Number
+import Debug.Trace
+import Numeric.GSL.Root
+import NLFitting
 
 newton
   :: N a
@@ -16,19 +19,20 @@ newton
 newton f inputs x0 = go 0 x0
   where
     go iter x
-      | iter > 50 = Left "too many iterations"
+      | iter > 50 = Left ("too many iterations, last guess " <> show x)
       | (fx, (dx:dis)) <- R.grad' (\ (x:is) -> f is x) (x:inputs) =
-        if abs fx < 1e-15 then
+        trace (show (x, fx, dx, fx / dx)) $
+        if abs fx < 1e-10 then
           Right (x, dis, dx)
         else
           go (succ iter) (x - fx / dx)
 
 -- | Bisection solver
-solve f = go 0 (-10) 10
+bisectionSolve f min max = go 0 min max
   where
     go iter a b
        | iter > 50 = Left "too many iterations"
-       | abs (f mid) < 1e-9 = Right mid
+       | abs (f mid) < 1e-10 = Right (mid, iter)
        | f mid > 0 && f a < 0 = go (succ iter) a mid
        | f mid > 0 && f b < 0 = go (succ iter) mid b
        | f mid < 0 && f a > 0 = go (succ iter) a mid
@@ -37,3 +41,12 @@ solve f = go 0 (-10) 10
          ["bracket doesn't contain root f(", show a, ")=", show (f a)
          ,", f(", show b, ")=", show (f b)]
        where mid = (a+b)/2
+
+-- fails if can't solve
+-- need to add implicit function theorem
+-- as a quick hack we can just call fitSystem with 'r'
+brent f min max = r
+  where
+    r = uniRoot Brent 0x1p-28 100 f min max
+
+-- brent (\ x -> let s = SABR {f0 = 1.3465, t = 2.7397260273972603e-3, σ0 = 8.091763568780608e-2, ν = 8.276827983108886, ρ = -0.5158156659150436} in bs (Delta SpotPips) (BS {k = x, d = Call, t = 2.7397260273972603e-3, s = 1.3465, σ = smileVol s x, rf = 3.46e-2, rd = 2.94e-2}) - 0.25) 1 2

@@ -4,6 +4,12 @@ module Traversables where
 import Data.Kind
 import Control.DeepSeq
 import GHC.Generics (Generic)
+import qualified Control.Monad.State.Strict as S
+
+-- | Replace elements of 'Traversable'
+-- @replace t (toList t) = t@
+replace :: Traversable t => [a] -> t b -> t a
+replace l t = S.evalState (mapM (const $ S.state (\ (x:xs) -> (x,xs))) t) l
 
 class Traversable t => FromList (t :: Type -> Type) where
   fromList :: [a] -> t a
