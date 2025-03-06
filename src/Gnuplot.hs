@@ -16,10 +16,12 @@ plotf :: Double -> Double -> (Double -> Double) -> IO ()
 plotf a b f = plotGraphs [defaultStyle $ functionPlot a b f]
 
 functionPlot :: Double -> Double -> (Double -> Double) -> [(Double, Double)]
-functionPlot from to f = [(x, f x) | x <- xs]
-  where
-    n = 1000
-    xs = map (\m -> from + (to-from) * fromIntegral m / fromIntegral n) [0..n]
+functionPlot from to f = [(x, f x) | x <- linearScale 1000 from to]
+
+linearScale :: Fractional a => Integer -> a -> a -> [a]
+linearScale n from to =
+  map (\m -> from + (to-from) * fromIntegral m / fromIntegral n) [0..n]
+
 
 type Style = String
 

@@ -304,6 +304,10 @@ resolveStrike shortcut dir smile convs rates@RatesT{s} = case shortcut of
   SSDelta delta ->
     fitSystemThrow1 (T delta (TT smile rates)) s
                 $ \ (T delta (TT smile RatesT{s,t,rf,rd})) k ->
+      -- works with t=0
+--       strikeFromDelta (deltaConvAt t convs)
+--         DeltaBS{d=id dir,delta,t,s,σ=smileVol smile k,rf,rd} - k
+      if_ EQ t 0 (k-s) $
       bs (Delta (deltaConvAt t convs))
         BS{k,d=id dir,σ=smileVol smile k,s,rf,rd,t} - delta
   SSStrike s -> s

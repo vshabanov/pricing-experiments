@@ -171,7 +171,7 @@ volPrice pv os market =
 
 o :: N a => Option a
 -- o = opt (M 6) SSATM Call mkt
-o = opt (M 6) (SSDelta 0.25) Call mkt
+o = opt (Y 5) (SSATM) Call mkt
 -- op = opt (M 6) (SSDelta (-0.25)) Put mkt
 -- o =
 --   Option
@@ -203,7 +203,7 @@ mapInputs f = -- zip is $
   map f is :: [Double]
   where
     is = map fst $ inputs mkt
-greeksBumpImpliedVol = mapInputs (\ i -> dvdx' (\m -> impliedVol m (1.1 + get PricingDate m)) mkt 1 i 0.00001)
+greeksBumpImpliedVol = mapInputs (\ i -> dvdxUp (\m -> impliedVol m (1.1 + get PricingDate m)) mkt 1 i 0.00001)
 greeksADImpliedVol = snd $ jacobianPvGreeks (\m -> impliedVol m (1.1 + get PricingDate m) 1)
 greeksBumpLocalVol = mapInputs (\ i -> dvdx' (\m -> localVol m (1.1 + get PricingDate m)) mkt 1 i 0.000001)
 greeksADLocalVol = snd $ jacobianPvGreeks (\m -> localVol m (1.1 + get PricingDate m) 1)
@@ -326,7 +326,7 @@ smileAtT smiles rates =
 --     sUp   = sm (t+h)
 --     h = 0.0001
 
-smile :: N a => (FittedSmile (Expr a), FittedSmile (Expr a), Expr a -> Expr a -> Expr a) -> Rates (Expr a) -> Expr a -> Smile a
+smile :: N a => (FittedSmile (Expr a), FittedSmile (Expr a), String -> Expr a -> Expr a -> Expr a) -> Rates (Expr a) -> Expr a -> Smile a
 smile (sa0, sb0, interp) rates@Rates{..} t =
 --   trace (unlines $
 --       [printf "t=%f" (toD t)] -- , show sa, show sb]
@@ -360,13 +360,13 @@ smile (sa0, sb0, interp) rates@Rates{..} t =
         ,coefficients = solveCubicSpline
           [(toSplineX f k, toSplineY σ)
           |(k,σ) <-
-            [(k1dp , σ1dp)
+            [(kwdp , σwdp)
             ,(k10dp, σ10dp)
             ,(k25dp, σ25dp)
             ,(katm , σatm)
             ,(k25dc, σ25dc)
             ,(k10dc, σ10dc)
-            ,(k1dc , σ1dc)
+            ,(kwdc , σwdc)
             ]]
         }
 
@@ -389,24 +389,26 @@ smile (sa0, sb0, interp) rates@Rates{..} t =
     conv@(deltaConv, atmConv) = conventionsAt t convs
     sa = ensureSameConventions conv sa0
     sb = ensureSameConventions conv sb0
-    i f = interp (snd $ f sa) (snd $ f sb)
-    (σatm , katm ) = (i fsATMkσ, atmStrike atmConv ATMBS{s,t,rf,rd,σ=σatm})
+    i w f = interp w (snd $ f sa) (snd $ f sb)
+    (σatm , katm ) = (i "σATM" fsATMkσ, atmStrike atmConv ATMBS{s,t,rf,rd,σ=σatm})
     (k25dp, σ25dp) = kσf Put  (-0.25) fs25dpkσ
     (k25dc, σ25dc) = kσf Call   0.25  fs25dckσ
     (k10dp, σ10dp) = kσf Put  (-0.10) fs10dpkσ
     (k10dc, σ10dc) = kσf Call   0.10  fs10dckσ
-    (k1dp , σ1dp ) = kσ  Put  (-0.01)
-    (k1dc , σ1dc ) = kσ  Call   0.01
+    (kwdp , σwdp ) = kσ  Put  (-wingDelta)
+    (kwdc , σwdc ) = kσ  Call   wingDelta
     kσf d delta f = (ds d delta σ, σ)
       where
-        σ = i f
+        σ = i (unwords [show delta, show d]) f
     kσ d delta = (ds d delta σi, σi)
       where
-        σi = interp σa σb
-        σa = σ $ fsSmileFun10 sa
-        σb = σ $ fsSmileFun10 sb
-        σ sfun = smileVol sfun $ resolveStrike (SSDelta delta) d sfun
-          (fixedConventions conv) RatesT{s,t,rf,rd}
+        σi = interp (unwords [show delta, show d]) σa σb
+        σa = σ sa
+        σb = σ sb
+        σ fs = smileVol sfun $ resolveStrike (SSDelta delta) d sfun
+          (fixedConventions conv) (fsRatesT fs)
+          where
+            sfun = fsSmileFun10 fs
     ds d delta σ = strikeFromDelta deltaConv DeltaBS{d,delta,t,s,σ,rf,rd}
 
     localVol k =
@@ -437,6 +439,9 @@ smile (sa0, sb0, interp) rates@Rates{..} t =
         d²cdk² = diff dcdk k
         c = bs PV BS{k=k,d=Call,σ=impliedVol k,s,rf,rd,t}
     k = "k"
+
+wingDelta :: N a => a
+wingDelta = 0.01
 
 ensureSameConventions :: N a => Conventions -> FittedSmile a -> FittedSmile a
 ensureSameConventions targetConvs fs@FittedSmile{..}
@@ -622,22 +627,27 @@ volTableRowSmile v@VolTableRow{t,σatm,σbf25,σrr25,σbf10,σrr10} rates@Rates{
 
 printFittedSmiles :: IO () =
   forM_ (volSurfaceSmiles $ get VolSurface mkt)
-    $ \ FittedSmile{fsRatesT=RatesT{t}, fsSmileFun=sf, fsSmileFun10=sf10
+    $ \ FittedSmile{fsRatesT=rates@RatesT{t}, fsSmileFun=sf, fsSmileFun10=sf10
                    ,fsATMkσ=(ka,va)
                    ,fs25dpkσ=(kp25,vp25),fs25dckσ=(kc25,vc25)
                    ,fs10dpkσ=(kp10,vp10),fs10dckσ=(kc10,vc10)
                    } -> do
+      let k d delta = resolveStrike (SSDelta delta) d sf10 convs rates
+          kcw = k Call  wingDelta
+          kpw = k Put (-wingDelta)
+          vcw = smileVol sf10 kcw
+          vpw = smileVol sf10 kpw
       case (sf, sf10) of
         (SABR{σ0,ν,ρ}, SABR{σ0=s1,ν=v1,ρ=r1}) ->
           printf "t=%.4f\n25d %10.6f %10.6f %10.6f\n10d %10.6f %10.6f %10.6f\n"
             t σ0 ν ρ s1 v1 r1
         _ ->
           printf "t=%.4f\n%s, %s\n" t (show sf) (show sf10)
-      printf "        p10d       p25d       atm        c25d       c10d\n"
-      printf "k   %10.6f %10.6f %10.6f %10.6f %10.6f\n"
-        kp10 kp25 ka kc25 kc10
-      printf "σ   %10.6f %10.6f %10.6f %10.6f %10.6f\n"
-        vp10 vp25 va vc25 vc10
+      printf "        pwd        p10d       p25d       atm        c25d       c10d       cwd\n"
+      printf "k   %10.6f %10.6f %10.6f %10.6f %10.6f %10.6f %10.6f\n"
+        kpw kp10 kp25 ka kc25 kc10 kcw
+      printf "σ   %10.6f %10.6f %10.6f %10.6f %10.6f %10.6f %10.6f\n"
+        vpw vp10 vp25 va vc25 vc10 vcw
 
 smileFunGuess :: N a => T3 a
 -- smileFunGuess = T3 (-2) (-0.1) 0.1
@@ -733,7 +743,7 @@ smileInterpolator
   :: N a
   => [FittedSmile a]  -- ^ list of smiles fitted for [VolTableRow a]
   -> a             -- ^ time
-  -> (FittedSmile a, FittedSmile a, a -> a -> a) -- ^ (smileA, smileB, vol -> vol -> vol)
+  -> (FittedSmile a, FittedSmile a, String -> a -> a -> a) -- ^ (smileA, smileB, vol -> vol -> vol)
 smileInterpolator smiles = \ t ->
   let err e = error $ mconcat ["smileInterpolator (t=", show (toD t), "): ", e]
   in
@@ -755,30 +765,19 @@ smileInterpolator smiles = \ t ->
           err "an empty vol surface"
   where
     rows = Map.fromList [(toD $ fsT s, s) | s <- smiles]
-    interp 0 _ _ v1 _ = v1
-    interp t (toN -> t1) (toN -> t2) v1 v2 =
+    interp 0 _ _ _ v1 _ = v1
+    interp t (toN -> t1) (toN -> t2) what v1 v2 =
       -- Iain Clark, p65, Flat forward interpolation
       let v12 = (v2^2*t2 - v1^2*t1) / (t2 - t1) in
       if toD v12 < 0 then
-        error $ printf "smileInterpolator: negative forward variance v12 = %.8f, t1=%f, v1=%f, t2=%f, v2=%f"
-          (toD v12) (toD t1) (toD v1) (toD t2) (toD v2)
+        error $ printf "smileInterpolator: negative forward variance in %s, v12 = %.8f, t1=%f, v1=%f, t2=%f, v2=%f"
+          what (toD v12) (toD t1) (toD v1) (toD t2) (toD v2)
       else
         sqrt $ (v1^2*t1 + v12 * (t - t1)) / t
-
--- p = blackScholesPricer
---     $ Option { oStrike = 300, oMaturityInYears = 0.001, oDirection = Call }
--- mkt = \ case
---     Spot -> 300
---     Vol -> 0.21058845741208643
---     RateDom -> 0.03
---     RateFor -> 0.01
---     PricingDate -> 0
 
 test' what rd = p (modify RateDom (const rd) mkt) what
 
 m inp f = modify inp f mkt
-
---solvePriceToVol price = solve (\ x -> p (modify ImpliedVol (const $ const x) mkt) PV - price)
 
 trimCofree :: Int -> Cofree [] a -> Cofree [] a
 trimCofree 0 (x :< _)  = x :< []
@@ -824,9 +823,9 @@ volSmileCDF_LocalVol mkt t =
     dt = t / fromIntegral nt
 
 plot mkt = plotGraphs
---   $ map smileVariance $ drop 5 $ volSurfaceSmiles $ get VolSurface mkt
+  $ map smileVariance $ drop 5 $ volSurfaceSmiles $ get VolSurface mkt
 --  $ map variance [0.5,1..7] -- [0.1,0.15..1.5] -- [0.51,0.511..0.55]
-  $ map p $ concatMap (smilePlots mkt) [0.5,1..5]
+--   $ map p $ concatMap (smilePlots mkt) [0.5,1..5]
 --   $ map (p . volSmileCDF mkt) [0.1,0.15..1]
 --   $ map p
 --   $ concatMap (\ fs ->
@@ -851,7 +850,7 @@ plot mkt = plotGraphs
 --   ]
 --   [defaultStyle $ functionPlot 0.01 1 $ \ t -> impliedVol mkt t 1.3 ^ 2 * t]
   where
-    smileVariance fs@(fsSmileFun -> s) =
+    smileVariance fs@(fsSmileFun10 -> s) =
       p $ (\ v -> v^2 * fsT fs) . smileVol s
     variance t = let v2 = var (t+0.00001); v1 = var t in p $ \ x ->
       v1 x
@@ -864,7 +863,8 @@ plot mkt = plotGraphs
 --        1.3 1.4
 --         1 1.6
 --         0.01 1
-       (0.5 * oStrike o) (2 * oStrike o)
+      minSpot maxSpot
+--        (0.5 * oStrike o) (2 * oStrike o)
         -- (oStrike o - 0.1) (oStrike o + 0.1)
 
 opt :: N a => Tenor -> StrikeShortcut a -> OptionDirection -> Market a -> Option a
@@ -979,10 +979,10 @@ plot3d =
     blackScholesPricer o (modify PricingDate (const pd) $ m Spot (const s)) PV
   )
 
-plotVolSurf mkt = plotMeshFun [0.0,0.1..7]
+plotVolSurf mkt = plotMeshFun (linearScale 50 0 (oMaturityInYears o))
   -- [0.5,0.511.01..2::Double]
   -- [0.675,0.7..2.6] --
-  [60,61..150]
+  (linearScale 100 minSpot maxSpot)
   $ localVol mkt
 
 linInterpolate x (g:gs) = go g gs
@@ -994,6 +994,26 @@ linInterpolate x (g:gs) = go g gs
 
 -- почему-то digital лучше чем vanilla?
 -- увеличение nx желательно сопровождать увеличением nt
+
+--     (minSpot, maxSpot) = (exp (-3), otBarrier ot)
+--     (minSpot, maxSpot) = (otBarrier ot, exp 3)
+--     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
+--     maxSpot = oStrike o * 3 / 2
+--     minSpot = oStrike o     / 2
+minSpot :: N a => a
+minSpot = toN minSpotD
+
+maxSpot :: N a => a
+maxSpot = toN maxSpotD
+
+(minSpotD, maxSpotD) = (s min (-5), s max 5)
+  where
+    s minMax stdDev = toD
+      $ minMax (get Spot m) $ spotAtT o m stdDev (oMaturityInYears o)
+    m = mkt
+    -- makes a big difference between AD and Bump
+    -- need 0.1*s0 for σ=0.003, rd=0.2, rf=0.01 to have diagonally
+    -- dominant matrix; σ=0.03 is fine
 
 fem :: forall a . N a => Market a -> a
 fem = fem' 100 50
@@ -1038,18 +1058,6 @@ fem' nx nt market =
       (m .+ k mi*θ .* a) ((m .- k mi*(1-θ) .* a) #> um), succ mi)
       where a = a_bs mi
 --       (i .+ k mi*θ .* g_bs) ((i .- k mi*(1-θ) .* g_bs) #> um), succ mi)
---     nx = 500 :: Int
---     nt = 500 :: Int
---     (minSpot, maxSpot) = (exp (-3), otBarrier ot)
---     (minSpot, maxSpot) = (otBarrier ot, exp 3)
---     (minSpot, maxSpot) = (exp (-3), exp 3) -- так уже как в книжке
---     maxSpot = oStrike o * 3 / 2
---     minSpot = oStrike o     / 2
-    maxSpot = 2.3 -- 2.584 -- realToFrac $ toD $ max s0 $ spotAtT o market   5 τ
-    minSpot = 0.681 -- realToFrac $ toD $ min s0 $ spotAtT o market (-5) τ
-      -- makes a big difference between AD and Bump
-    -- need 0.1*s0 for σ=0.003, rd=0.2, rf=0.01 to have diagonally
-    -- dominant matrix; σ=0.03 is fine
     s0 = get Spot market
     k, iToT :: Int -> a
     k i = iToT (i+1) - iToT i
