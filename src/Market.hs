@@ -1,5 +1,7 @@
-{-# LANGUAGE GADTs, DerivingStrategies, DeriveAnyClass #-}
-{-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GADTs #-}
+{-# OPTIONS_GHC -Wincomplete-patterns #-}
 
 {- | Quick and dirty way to build computations based on modifiable inputs.
 
@@ -36,21 +38,17 @@ module Market
   , coerceGet
   ) where
 
-import Data.Maybe
-import Data.Bifunctor
-import qualified Control.Monad.State.Strict as S
-import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
-import Unsafe.Coerce
-import Data.MemoUgly
-import Debug.Trace
-import Control.DeepSeq
-import GHC.Generics (Generic)
-
-import Unique
-import Tenor
-import VolSurface
 import Analytic.Pure
+import Control.Monad.State.Strict qualified as S
+import Data.Bifunctor
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Maybe
+import Data.MemoUgly
+import Tenor
+import Unique
+import Unsafe.Coerce
+import VolSurface
 
 -- | @Get n a@ some data from the @Market n@ with type @a@
 data Get n a where
@@ -185,7 +183,7 @@ coerceGet :: Get a a -> Get b b
 coerceGet = unsafeCoerce
 
 mkt = buildMarket $ do
-  input Spot 1
+  input Market.Spot 1
   input RateDom 0.1
   v1d <- input (Vol "1D" ATMVol) 0.1
   v1y <- input (Vol "1Y" ATMVol) 0.2

@@ -2,8 +2,8 @@ module Unique
   (I, withNewId)
   where
 
-import System.IO.Unsafe (unsafePerformIO)
 import Data.IORef
+import System.IO.Unsafe (unsafePerformIO)
 
 withNewId :: (I -> a) -> a
 withNewId f = unsafePerformIO $ newId >>= pure . f

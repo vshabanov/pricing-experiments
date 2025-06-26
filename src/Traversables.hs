@@ -1,10 +1,11 @@
-{-# LANGUAGE DeriveAnyClass, DerivingVia #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingVia #-}
 module Traversables where
 
-import Data.Kind
 import Control.DeepSeq
+import Control.Monad.State.Strict qualified as S
+import Data.Kind
 import GHC.Generics (Generic)
-import qualified Control.Monad.State.Strict as S
 
 -- | Replace elements of 'Traversable'
 -- @replace t (toList t) = t@

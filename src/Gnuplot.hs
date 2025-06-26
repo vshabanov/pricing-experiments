@@ -7,8 +7,8 @@
 module Gnuplot where
 
 import Control.Monad (void)
+import Data.IntMap.Strict qualified as IntMap
 import Data.List (intercalate, sort)
-import qualified Data.IntMap.Strict as IntMap
 import System.Process (spawnCommand)
 import Text.Printf (printf)
 

@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 -- | Symbolic matrix
 module Symbolic.Matrix
   ( M, (!.), matrix
@@ -8,9 +7,9 @@ module Symbolic.Matrix
 import Data.Array
 import Data.Char
 import Data.List (intercalate)
-import Text.Printf
-import Symbolic
 import Number
+import Symbolic
+import Text.Printf
 
 newtype M a = M (Array (Int, Int) a)
 

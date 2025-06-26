@@ -1,13 +1,16 @@
-{-# LANGUAGE NoFieldSelectors, DuplicateRecordFields, DerivingStrategies, DeriveAnyClass #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE NoFieldSelectors #-}
 module Spline where
 
 import Control.DeepSeq
-import GHC.Generics (Generic)
 import Data.Array
-import Tridiag
+import GHC.Generics (Generic)
 import NLFitting
-import Traversables
 import Number
+import Traversables
+import Tridiag
 
 -- | Cubic spline coefficients for interpolation (first derivatives)
 data CubicSplineK a = CubicSplineK

@@ -4,11 +4,10 @@ module Solving
   )
   where
 
-import qualified Numeric.AD.Mode.Reverse as R
-import Number
 import Debug.Trace
+import Number
+import Numeric.AD.Mode.Reverse qualified as R
 import Numeric.GSL.Root
-import NLFitting
 
 newton
   :: N a

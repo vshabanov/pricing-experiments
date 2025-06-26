@@ -1,15 +1,12 @@
 -- | Market-based analytic pricers
 module Analytic.Market where
 
-import Control.DeepSeq
-import Data.Number.Erf
-import Data.List
-import Number
-import Market
 import Analytic.Pure
-import Debug.Trace
-import Text.Printf
-
+import Control.DeepSeq
+import Data.List
+import Data.Number.Erf
+import Market
+import Number
 import StructuralComparison
 
 data Option a
@@ -36,7 +33,7 @@ data Forward a
 newtype Strike a = Strike { strike :: a }
   deriving (Num, Fractional, Floating, Erf, Show, NFData, InvErf, Ord, Eq, StructuralOrd, StructuralEq, N)
 newtype MaturityInYears a = MaturityInYears { maturityInYears :: a }
-  deriving (Num, Fractional, Floating, Erf, Show, NFData, InvErf, Ord, Eq, StructuralOrd, StructuralEq, N)
+  deriving (Num, Fractional, Floating, Erf, Show)
 
 rates :: Market a -> Rates a
 rates m = Rates{s = get Spot m, rf = get RateFor m, rd = get RateDom m}

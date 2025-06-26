@@ -1,15 +1,11 @@
-{-# LANGUAGE DerivingStrategies, DeriveAnyClass #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
 module VolSurface where
 
-import Data.Ord
-import Data.Maybe
-import Data.List
+import Analytic.Pure
 import Control.DeepSeq
 import GHC.Generics (Generic)
-
-import Analytic.Pure
 import Tenor
-import Number
 
 data VolSurface a
   = VolSurface_

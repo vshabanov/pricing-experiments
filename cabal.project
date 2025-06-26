@@ -1,5 +1,14 @@
+multi-repl: True
+
 packages:
   *.cabal
+
+extra-packages:
+  stylish-haskell
+
+package *
+  ghc-options: -fhide-source-paths
+  debug-info: 2
 
 package ad
   flags: +ffi
@@ -12,12 +21,12 @@ package ad
 
 package pricing-experiments
   optimization: 2
-  ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS
-  executable-dynamic: True
---                -finfo-table-map -fdistinct-constructor-tables
+  ghc-options: +RTS -N8 -M12G -A64M -n2M -RTS -j -fwarn-tabs -ferror-spans
 --               -fno-unoptimized-core-for-interpreter
+--                -finfo-table-map -fdistinct-constructor-tables
 --   profiling: True
 --   profiling-detail: all-functions
+  executable-dynamic: True
 
 -- package hmatrix
 --   flags: +openblas

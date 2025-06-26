@@ -5,8 +5,8 @@ module StructuralComparison where
 import Control.DeepSeq
 import Data.Number.Erf
 import Data.Reflection (Reifies)
-import qualified Numeric.AD.Internal.Reverse as R
-import qualified Numeric.AD.Internal.Reverse.Double as RD
+import Numeric.AD.Internal.Reverse qualified as R
+import Numeric.AD.Internal.Reverse.Double qualified as RD
 
 -- | Structural equality.
 -- @x == x^2@ for some @x@-es, but their derivatives are different

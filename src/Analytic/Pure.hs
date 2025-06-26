@@ -1,21 +1,20 @@
-{-# LANGUAGE NoFieldSelectors, DuplicateRecordFields, OrPatterns,
-             TemplateHaskell, DerivingStrategies, DeriveAnyClass #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE OrPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 -- | Pure analytic pricers, no market dependencies
 module Analytic.Pure where
 
 import Control.DeepSeq
-import GHC.Generics (Generic)
-import Debug.Trace
 import Data.Number.Erf
-import Text.Printf
-import Data.Ord
-import Data.List
-
-import Number
-import StructuralComparison
+import GHC.Generics (Generic)
 import NLFitting
+import Number
 import Spline
 import Tenor
+import Text.Printf
 import Traversables
 
 data Greek
@@ -31,12 +30,15 @@ data Greek
   | Theta
   deriving (Show, Eq)
 
+data PremiumConv
+  = Pips    -- ^ regular
+  | Percent -- ^ premium-adjusted
+  deriving (Show, Eq)
+
 data DeltaConvention
-  = SpotPips       -- ^ default BS delta
-  | SpotPercent    -- ^ premium-adjusted delta
-  | ForwardPips
-  | ForwardPercent -- ^ premium-adjusted forward delta
-  | Simple
+  = SpotDelta PremiumConv -- ^ @'Spot' 'Pips'@ is default BS delta
+  | ForwardDelta PremiumConv
+  | SimpleDelta
   deriving (Show, Eq)
 
 data OptionDirection
@@ -121,9 +123,8 @@ data FBS a
 fbs :: Erf a => Greek -> FBS a -> a
 fbs greek FBS{k,d,t,f,σ} = case greek of
   FV
-  Delta ForwardPips
-  Delta ForwardPercent
-  Delta Simple -> b
+  Delta ForwardDelta{}
+  Delta SimpleDelta -> b
   where
     b = bs greek BS{k,d,t,s=f,σ,rf=0,rd=0}
 
@@ -138,15 +139,15 @@ bs greek BS{k,d,t=τ,s=x,σ,rf,rd} = case greek of
     φ * k * τ * exp (-rd*τ) * nc (φ*dm)
   RhoFor ->
     -φ * x * τ * exp (-rf*τ) * nc (φ*dp)
-  Delta SpotPips ->
+  Delta (SpotDelta Pips) ->
     φ * exp (-rf*τ) * nc (φ*dp)
-  Delta SpotPercent ->
+  Delta (SpotDelta Percent) ->
     φ * exp (-rd*τ) * k/x * nc (φ*dm)
-  Delta ForwardPips ->
+  Delta (ForwardDelta Pips) ->
     φ * nc (φ*dp)
-  Delta ForwardPercent ->
+  Delta (ForwardDelta Percent) ->
     φ * k/f * nc (φ*dm)
-  Delta Simple ->
+  Delta SimpleDelta ->
     φ * nc (φ*d_)
   DualDelta ->
     -φ * exp (-rd*τ) * nc (φ*dm)
@@ -234,13 +235,13 @@ data DeltaBS a
 
 strikeFromDelta :: N a => DeltaConvention -> DeltaBS a -> a
 strikeFromDelta deltaConv dbs@DeltaBS{d,delta,t=τ,s=x,σ,rf,rd} = case deltaConv of
-  SpotPips ->
+  SpotDelta Pips ->
     f * exp (-φ * invnormcdf (φ * exp (rf*τ) * delta) * σ*sqrt τ + σ^2/2*τ)
-  ForwardPips ->
+  ForwardDelta Pips ->
     f * exp (-φ * invnormcdf (φ * delta) * σ*sqrt τ + σ^2/2*τ)
-  SpotPercent -> fit SpotPips
-  ForwardPercent -> fit ForwardPips
-  Simple ->
+  SpotDelta Percent -> fit (SpotDelta Pips)
+  ForwardDelta Percent -> fit (ForwardDelta Pips)
+  SimpleDelta ->
     f * exp (-φ * invnormcdf (φ * delta) * σ*sqrt τ)
   where
     φ = directionφ d
@@ -275,11 +276,11 @@ atmStrike :: N a => ATMConvention -> ATMBS a -> a
 atmStrike atmConv ATMBS{t=τ,s=x,σ,rf,rd} = case atmConv of
   ATMSpot -> x
   ATMForward -> f
-  ATMDeltaNeutral (SpotPips; ForwardPips) ->
+  ATMDeltaNeutral (SpotDelta Pips; ForwardDelta Pips) ->
     f * exp (σ^2 * τ / 2)
-  ATMDeltaNeutral (SpotPercent; ForwardPercent) ->
+  ATMDeltaNeutral (SpotDelta Percent; ForwardDelta Percent) ->
     f * exp (- σ^2 * τ / 2)
-  ATMDeltaNeutral Simple -> f
+  ATMDeltaNeutral SimpleDelta -> f
   where
     f = x * exp ((rd-rf)*τ)
 
@@ -313,20 +314,40 @@ resolveStrike shortcut dir smile convs rates@RatesT{s} = case shortcut of
   SSStrike s -> s
 
 type Conventions = (DeltaConvention, ATMConvention)
-data ConventionsTable = ConventionsTable [(Tenor, Conventions)]
-  deriving Show
+type ConventionsTable = Intervals Tenor Conventions
 
-fixedConventions c = ConventionsTable [(D 0, c)]
+data Intervals i a
+  = INil a
+  | ICons a (IntervalEnd i) (Intervals i a)
+  deriving (Show, Functor)
+
+data IntervalEnd a
+  = Including a -- ^ closed interval
+  | Excluding a -- ^ open interval
+  deriving (Show, Functor)
+
+mapEndpoints :: (a -> b) -> Intervals a c -> Intervals b c
+mapEndpoints f = \ case
+  INil a -> INil a
+  ICons l i r -> ICons l (f <$> i) (mapEndpoints f r)
+
+intervalsAt :: Ord i => i -> Intervals i a -> a
+intervalsAt x = go
+  where
+    go = \ case
+      INil a -> a
+      ICons a point is -> case point of
+        Including i | x <= i -> a
+        Excluding i | x < i  -> a
+        _ -> go is
+
+fixedConventions c = INil c
 
 deltaConvAt t c = fst $ conventionsAt t c
 atmConvAt t c = snd $ conventionsAt t c
 
 conventionsAt :: N a => a -> ConventionsTable -> Conventions
-conventionsAt t (ConventionsTable xs) =
-  maybe
-    (error $ mconcat
-     ["Can't find conventions for t = ", show (toD t), " in ", show xs])
-    snd (find ((t >=) . tenorToYear . fst) $ sortBy (comparing $ Down . fst) xs)
+conventionsAt t c = intervalsAt t (mapEndpoints tenorToYear c)
 
 ------------------------------------------------------------------------------
 -- Smiles

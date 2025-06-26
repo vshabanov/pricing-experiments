@@ -7,58 +7,69 @@ maintainer:          dev@vshabanov.com
 build-type:          Simple
 extra-source-files:  CHANGELOG.md
 
-common common
-  build-depends:
-    QuickCheck >= 2.14.2,
-    ad,
-    array >= 0.5.3.0,
-    async,
-    base >=4.12,
-    bytestring >= 0.12.0.2,
-    comfort-array,
-    containers >= 0.6.0.1,
-    criterion,
-    deepseq >= 1.5.0.0,
-    erf,
-    extra,
-    free,
-    ghc-bignum >= 1.3,
-    ghc-prim >= 0.11.0,
-    hmatrix,
-    hmatrix-gsl,
-    mtl >= 2.3.1,
-    mwc-random,
-    parsec >= 3.1.17.0,
-    pretty-show >= 1.10,
-    process >= 1.6.18.0,
-    random >= 1.2.0,
-    recursion-schemes,
-    reflection >= 2.1.8,
-    split >= 0.2.5,
-    splitmix,
-    template-haskell,
-    text >= 1.2.4.1,
-    unordered-containers >= 0.2.13.0,
-    uglymemo,
-    vector,
+common language-settings
   default-language:
-    GHC2021
-    -- GHC2024 shows "rigid variable ..." errors
+    GHC2024
   default-extensions:
-    BangPatterns
-    LambdaCase
     OverloadedStrings
     RecordWildCards
     ViewPatterns
+  ghc-options: -Wunused-imports
+               -- -Wall
   -- other-extensions:
+
+common symbolic-depends
+  build-depends:
+    ad,
+    array,
+    base,
+    containers,
+    deepseq,
+    erf,
+    ghc-bignum,
+    mtl,
+    parsec,
+    reflection,
+
+library symbolic
+  import: language-settings
+  import: symbolic-depends
   hs-source-dirs:
-    src
-  ghc-options: -rtsopts -with-rtsopts "-M8G"
-  -- -threaded
-  -- ^ slower GC, no par GC
+    symbolic/src
+  exposed-modules:
+    Number
+    StructuralComparison
+    Symbolic
+    Symbolic.Matrix
+    Unique
+  other-modules:
+    Symbolic.Internal
+  ghc-options: -Wincomplete-patterns
+               -- -fno-unoptimized-core-for-interpreter
+
+test-suite test-symbolic
+  import:  language-settings
+  import:  symbolic-depends
+  type:    exitcode-stdio-1.0
+  main-is: Symbolic/Test.hs
+  hs-source-dirs:
+    symbolic/src
+  other-modules:
+    Number
+    StructuralComparison
+    Symbolic
+    Symbolic.Internal
+    Unique
+  build-depends:
+    QuickCheck
 
 executable Test
-  import: common
+  import: language-settings
+  import: symbolic-depends
+  hs-source-dirs:
+    src
+--     symbolic/src
+    -- ^ uncomment to load all files in the repl instead of using the library
   main-is:
     Main.hs
   other-modules:
@@ -72,27 +83,39 @@ executable Test
     Gnuplot
     Market
     NLFitting
-    Number
     Percent
     Random
     Solving
     Spline
-    StructuralComparison
-    Symbolic
-    Symbolic.Matrix
     Tenor
     TestData
     Traversables
     Tridiag
-    Unique
     VolSurface
-
-test-suite test-symbolic
-  import: common
-  type:    exitcode-stdio-1.0
-  main-is: Symbolic.hs
-  other-modules:
-    Number
-    StructuralComparison
-    Unique
-  ghc-options: -main-is Symbolic.testSymbolic
+  build-depends:
+    QuickCheck >= 2.14.2,
+    async,
+    bytestring >= 0.12.0.2,
+    criterion,
+    extra,
+    free,
+    ghc-bignum >= 1.3,
+    ghc-prim >= 0.11.0,
+    hmatrix,
+    hmatrix-gsl,
+    mwc-random,
+    pretty-show >= 1.10,
+    process >= 1.6.18.0,
+    random >= 1.2.0,
+    recursion-schemes,
+    split >= 0.2.5,
+    splitmix,
+    template-haskell,
+    text >= 1.2.4.1,
+    uglymemo,
+    unordered-containers >= 0.2.13.0,
+    vector,
+    symbolic,
+  ghc-options: -rtsopts -with-rtsopts "-M8G"
+  -- -threaded
+  -- ^ slower GC, no par GC

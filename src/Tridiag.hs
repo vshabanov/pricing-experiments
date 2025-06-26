@@ -11,19 +11,16 @@ module Tridiag
   )
 where
 
-import Data.Array
 import Control.Monad
 import Control.Monad.ST
-import qualified Data.Vector.Mutable as M
-import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as U
-
-import qualified Numeric.LinearAlgebra as LA
-
+import Data.Array
+import Data.Vector qualified as V
+import Data.Vector.Mutable qualified as M
+import Number
+import Numeric.LinearAlgebra qualified as LA
 import Test.QuickCheck
 import Text.Printf
 import Traversables
-import Number
 
 infixl 6 .+, .- -- same as (+)
 infixl 7 .*, #> -- same as (*)

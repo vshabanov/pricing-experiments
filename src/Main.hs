@@ -1,52 +1,47 @@
-{-# LANGUAGE MagicHash, ScopedTypeVariables, CPP, MultilineStrings, TemplateHaskell #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE MultilineStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+
 {-# OPTIONS_GHC -Wno-gadt-mono-local-binds -Wno-ambiguous-fields #-}
 
 module Main (module Main) where
 
-import qualified Control.Exception as E
-import Control.DeepSeq
-import Data.Number.Erf
-import qualified Data.Map.Strict as Map
-import Debug.Trace
-import Data.List.Split
-import Data.Foldable
-import Data.Array
-import Criterion.Main
-import Data.Maybe
-import Data.Tuple.Extra
-import qualified Numeric.LinearAlgebra as LA
-import Control.Monad
-import Data.List
+import Analytic
+import Bump
+import Control.Comonad.Cofree
 import Control.Concurrent
 import Control.Concurrent.Async
-import System.IO.Unsafe
-import Text.Printf
-import qualified Numeric.AD.Mode.Reverse.Double as RD
-import Control.Comonad.Cofree
+import Control.DeepSeq
+import Control.Exception qualified as E
+import Control.Monad
+import Criterion.Main
+import Data.List
+import Data.List.Split
+import Data.Map.Strict qualified as Map
+import Data.Maybe
 import Data.MemoUgly
-import GHC.Conc
-import Text.Show.Pretty
-
-import Numeric.GSL.Interpolation
-
-import Random
-import Tridiag
-import Market
+import Data.Number.Erf
+import Debug.Trace
 import Gnuplot
-import Tenor
-import Analytic
-import StructuralComparison
-import Solving
-import Symbolic
-import Number
-import Bump
+import Market
 import NLFitting
-import Traversables
+import Number
+import Numeric.AD.Mode.Reverse.Double qualified as RD
+import Numeric.LinearAlgebra qualified as LA
 import Percent
-import VolSurface
-import FreeVars
+import Random
 import Spline
+import StructuralComparison
+import Symbolic
+import System.IO.Unsafe
+import Tenor
 import TestData
+import Text.Printf
+import Traversables
+import Tridiag
+import VolSurface
 
 -- мало что меняет, видимо маленьких значений нет
 treeSum l = case splitSum l of -- $ sort l of
@@ -188,7 +183,7 @@ ot = OneTouch
   , otMaturityInYears = oMaturityInYears o
   }
 f :: N a => Forward a
-f = Forward { fStrike = oStrike o, fMaturityInYears = oMaturityInYears o }
+f = Forward { fStrike = oStrike o, fMaturityInYears = MaturityInYears $ oMaturityInYears o }
 
 p :: N a => Market a -> Greek -> a
 getPv :: N a => Market a -> (a -> a) -> a
@@ -211,14 +206,14 @@ greeksBump = mapInputs (\ i -> dvdx PV i 0.00001)
 greeksBumpFem = mapInputs (\ i -> dvdx' (const . fem) mkt () i 0.00001)
 greeksBumpIntegrated = mapInputs (\ i -> dvdx' (const . integrated) mkt () i 0.00001)
 greeksBumpMonteCarlo = mapInputs (\ i -> dvdx' (const . monteCarlo) mkt () i 0.00001)
-greeksAnalytic = map (p mkt) [Delta SpotPips, Vega, RhoDom, RhoFor, Theta-- , Gamma, Vanna
+greeksAnalytic = map (p mkt) [Delta (SpotDelta Pips), Vega, RhoDom, RhoFor, Theta-- , Gamma, Vanna
                              ] :: [Double]
 compareToAnalytic !g =
   map (\(g,is) -> p mkt g `pct` sum (mapMaybe (flip lookup gs) is)) mapping
   where
     gs = zip (map fst $ inputs (mkt :: Market Double)) g
     mapping =
-      [(Delta SpotPips, [Spot])
+      [(Delta (SpotDelta Pips), [Spot])
       ,(Vega, [i | (i@(Vol _ ATMVol),_) <- gs])
       ,(RhoDom, [RateDom])
       ,(RhoFor, [RateFor])

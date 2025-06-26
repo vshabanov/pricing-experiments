@@ -4,13 +4,10 @@ module FreeVars
   (captureFreeVars
   ) where
 
-import Control.Monad
 import Data.Maybe
-import Language.Haskell.TH
-import Language.Haskell.TH.Syntax
-import Language.Haskell.TH.Quote
 import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
+import Language.Haskell.TH
 
 -- | Extract free variables from a Template Haskell expression
 getFreeVars :: Exp -> Q (Set Name)

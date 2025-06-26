@@ -1,6 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
 
-{-# OPTIONS_GHC -O2 #-}
 module NLFitting
   ( fitSystemQ1
   , fitSystemQ
@@ -10,28 +9,23 @@ module NLFitting
   )
   where
 
-import Data.Foldable
-import Data.Reflection (Reifies)
-import qualified Numeric.LinearAlgebra as LA
-import qualified Numeric.AD.Mode.Reverse.Double as RD
-import qualified Numeric.AD.Internal.Reverse.Double as RD
-import Text.Printf
-import Data.MemoUgly
-import Data.Bifunctor
-import Numeric.GSL.Fitting
-import Debug.Trace
-
-import qualified Symbolic.Matrix as S
-import Symbolic
 import Bump.Pure
-import Number
-import Traversables
-import Percent
-
-import Language.Haskell.TH
+import Data.Bifunctor
+import Data.Foldable
+import Data.MemoUgly
+import Data.Reflection (Reifies)
 import FreeVars
-import Data.Set (Set)
-import qualified Data.Set as Set
+import Language.Haskell.TH
+import Number
+import Numeric.AD.Internal.Reverse.Double qualified as RD
+import Numeric.AD.Mode.Reverse.Double qualified as RD
+import Numeric.GSL.Fitting
+import Numeric.LinearAlgebra qualified as LA
+import Percent
+import Symbolic
+import Symbolic.Matrix qualified as S
+import Text.Printf
+import Traversables
 
 --fitTest :: [(Double, [Double])]
 fitTest :: N a => (Maybe a, [[Double]]) -- [[(String, Double)]])
@@ -254,6 +248,7 @@ fitSystem inputs guesses system0
     guessesD = map toD guesses
     m = length guesses
     n = length inputs
+    system :: forall a . N a => [a] -> [a] -> [a]
     system is gs
       | length es /= m = error $ "system returned " <> show (length es)
         <> " equations instead of " <> show m

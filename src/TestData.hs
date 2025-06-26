@@ -1,11 +1,10 @@
 {-# LANGUAGE MultilineStrings #-}
 module TestData where
 
-import Market
 import Analytic
-import Tenor
-import VolSurface
+import Market
 import Number
+import Tenor
 
 data TestData
   = EURUSD
@@ -28,15 +27,28 @@ testRates = do
   rd <- input RateDom rd
   pure (Rates <$> s <*> rf <*> rd)
 
+premiumConvention = case testData of
+  DummyData -> Pips
+  EURUSD -> Pips
+  USDJPY -> Percent
+
 convs = case testData of
-  DummyData -> ConventionsTable
-    [(D 0, (SpotPips, ATMDeltaNeutral SpotPips))]
-  EURUSD -> ConventionsTable
-    [(D 0, (SpotPips, ATMDeltaNeutral SpotPips))
-    ,(Y 1, (ForwardPips, ATMDeltaNeutral ForwardPips))]
-  USDJPY -> ConventionsTable
-    [(D 0, (ForwardPercent, ATMDeltaNeutral ForwardPercent))]
-    -- TODO: is it the same for all tenors?
+  DummyData -> INil (ForwardDelta pc, ATMDeltaNeutral $ ForwardDelta pc)
+  EURUSD -> oecd
+  USDJPY -> oecd
+  where
+    pc = premiumConvention
+    -- [Wystup2010] "If the currency pair contains only currencies from
+    -- the OECD economies (USD, EUR, JPY, GBP, AUD, NZD, CAD, CHF,
+    -- NOK, SEK, DKK), and does not include ISK, TRY, MXN, CZK, KRW,
+    -- HUF, PLN, ZAR or SGD, then spot deltas are used out to and
+    -- including 1Y. For all longer dated tenors forward deltas are
+    -- used."
+    oecd = ICons
+      (SpotDelta pc, ATMDeltaNeutral $ SpotDelta pc)
+      (Including (Y 1))
+      (INil (ForwardDelta pc, ATMDeltaNeutral $ ForwardDelta pc))
+
 
 testSurface :: N a => [VolTableRow Tenor a]
 testSurface =
@@ -44,7 +56,7 @@ testSurface =
   DummyData ->
     """
 --   Exp   Bid     Ask    RR25   BF25    RR10   BF10
-    30Y   10      10     0      0       0      0
+    10Y   10      10     0      0       0      0
     """
   EURUSD ->
     """

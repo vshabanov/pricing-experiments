@@ -1,8 +1,7 @@
 module Bump.Market where
 
-import Number
 import Market
-import Bump.Pure
+import Number
 
 dvdxUp :: N n => (Market n -> a -> n) -> Market n -> a -> Get n n -> n -> n
 dvdxUp p mkt what x (bump :: n) =

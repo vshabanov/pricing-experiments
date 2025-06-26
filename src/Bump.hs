@@ -3,5 +3,5 @@ module Bump
   ,module Bump.Market)
   where
 
-import Bump.Pure
 import Bump.Market
+import Bump.Pure

@@ -1,19 +1,16 @@
 {-# LANGUAGE UndecidableInstances #-}
 --  ^ for Reifies s RD.Tape => N (RD.ReverseDouble s)
-{-# OPTIONS_GHC -Wincomplete-patterns -O2 #-}
 module Number where
 
-import Data.Array
 import Control.DeepSeq
+import Data.Array
 import Data.Number.Erf
 import Data.Reflection
-import qualified Numeric.AD.Mode as R
-import qualified Numeric.AD.Mode.Reverse as R
-import qualified Numeric.AD.Mode.Reverse.Double as RD
-import qualified Numeric.AD.Internal.Reverse.Double as RD
-import qualified Numeric.AD.Internal.Reverse as R
-import qualified Numeric.AD.Jacobian as J
-import GHC.TypeError
+import Numeric.AD.Internal.Reverse qualified as R
+import Numeric.AD.Internal.Reverse.Double qualified as RD
+import Numeric.AD.Jacobian qualified as J
+import Numeric.AD.Mode qualified as R
+import Numeric.AD.Mode.Reverse.Double qualified as RD
 import StructuralComparison
 
 instance NFData (R.Reverse s a) where

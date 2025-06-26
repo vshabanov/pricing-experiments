@@ -1,4 +1,5 @@
-{-# LANGUAGE MagicHash, ViewPatterns #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Random
   ( gaussianQuasiRandom
@@ -11,26 +12,16 @@ module Random
   )
   where
 
-import qualified System.Random.SplitMix as SplitMix
-import qualified Control.Monad.State.Strict as State.Strict
-import Control.Monad.Identity
-import System.Random.Stateful (StatefulGen(..))
 import Data.List
 import Data.List.Split
-import Data.Number.Erf
 import Data.Monoid
-
-import GHC.Word
+import Data.Number.Erf
 import GHC.Float
 import GHC.Num.Primitives (wordReverseBits#)
-import GHC.Prim (word2Double#, (*##))
-
-import qualified System.Random.MWC as MWC
-import qualified System.Random.MWC.Distributions as MWC
-
-import qualified Data.Vector.Unboxed as U
-
+import GHC.Prim (word2Double#)
+import GHC.Word
 import Gnuplot
+import System.Random.SplitMix qualified as SplitMix
 
 {-# INLINE gaussianQuasiRandom #-}
 {-# INLINE gaussian #-}
@@ -101,12 +92,12 @@ corput2 (W# w) = (D# (word2Double# (wordReverseBits# w))) * 0x1p-64
 -- True
 
 
-newtype DummyGen = DummyGen ()
+-- newtype DummyGen = DummyGen ()
 
-instance StatefulGen DummyGen (State.Strict.State SplitMix.SMGen) where
-   uniformWord64 _ = State.Strict.StateT $ Identity . SplitMix.nextWord64
-   uniformWord32 _ = State.Strict.StateT $ Identity . SplitMix.nextWord32
-   uniformShortByteString = error "uniformShortByteString SMGen is not implemented" -- added to remve MonadIO constraint from the default implementation
+-- instance StatefulGen DummyGen (State.Strict.State SplitMix.SMGen) where
+--    uniformWord64 _ = State.Strict.StateT $ Identity . SplitMix.nextWord64
+--    uniformWord32 _ = State.Strict.StateT $ Identity . SplitMix.nextWord32
+--    uniformShortByteString = error "uniformShortByteString SMGen is not implemented" -- added to remve MonadIO constraint from the default implementation
 
 -- replicateM is 10-20% faster in GHCi and slightly faster in -O2 microbenchmark
 replicateAcc n act = go n []
